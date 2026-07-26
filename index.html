@@ -1,0 +1,2086 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>HexaSort Web</title>
+<style>
+  /* Канвас по центру окна, масштаб с сохранением пропорций 720x900 */
+  html, body {
+    height: 100%;
+    margin: 0;
+    background: #1E2A3A;
+    overflow: hidden;
+  }
+  body {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  canvas {
+    display: block;
+    aspect-ratio: 720 / 900;
+    width: auto;
+    height: auto;
+    max-width: 100%;
+    max-height: 100%;
+    touch-action: none;          /* нужно для Pointer Events на телефоне (Phase 2) */
+    -webkit-user-select: none;
+    user-select: none;
+  }
+</style>
+</head>
+<body>
+<canvas id="game" width="720" height="900"></canvas>
+<script>
+'use strict';
+
+// ============================================================================
+// CONFIG — все игровые числа и палитра. Баланс крутится только отсюда.
+// ============================================================================
+const CONFIG = {
+  canvas:    { width: 720, height: 900 },
+  // Поле растёт кольцами по счёту: 19 -> 37 -> 61 ячейки (ADR-0004).
+  // Гексы при этом уменьшаются, чтобы поле целиком помещалось в канвас.
+  board:     { startFillPercent: 0.30,
+               // Каждое новое кольцо приносит +3 цвета: 4 -> 7 -> 10
+               radiusSteps: [
+                 { fromScore: 0,    radius: 2, colors: 4  },
+                 { fromScore: 1000, radius: 3, colors: 7  },
+                 { fromScore: 2500, radius: 4, colors: 10 }
+               ] },
+  hex:       { orientation: 'flat', maxSize: 55 },
+  // Ступени стопок: с ростом счёта появляются двух- и трёхцветные, высота растёт.
+  // Высота подбирается под выпавший тип (duo нужно >= 4 фишки, tri >= 6 при
+  // minBlockSize 2), поэтому веса соблюдаются точно и тип не «проседает» (ADR-0004).
+  stack:     { minBlockSize: 2,
+               stages: [
+                 { fromScore: 0,   weights: { mono: 100, duo: 0,  tri: 0  }, minHeight: 2, maxHeight: 4 },
+                 { fromScore: 100, weights: { mono: 30,  duo: 70, tri: 0  }, minHeight: 3, maxHeight: 5 },
+                 { fromScore: 500, weights: { mono: 20,  duo: 50, tri: 30 }, minHeight: 4, maxHeight: 6 }
+               ] },
+  merge:     { burnThreshold: 10, maxWaveIterations: 100 },
+  // Набор цветов расширяется вместе с полем (см. board.radiusSteps): 4 -> 7 -> 10.
+  // Порядок важен: первые четыре — самые контрастные.
+  colors:    { palette: [
+                 '#E74C3C',   // 1 красный
+                 '#3498DB',   // 2 синий
+                 '#2ECC71',   // 3 зелёный
+                 '#F1C40F',   // 4 жёлтый
+                 '#9B59B6',   // 5 фиолетовый
+                 '#E67E22',   // 6 оранжевый
+                 '#1ABC9C',   // 7 бирюзовый
+                 '#E84393',   // 8 розовый
+                 '#ECF0F1',   // 9 белый
+                 '#8D6E63'    // 10 коричневый (осветлён — на тёмном фоне читается)
+               ] },
+  // Очки начисляются только за сгоревшие фишки — перелив сам по себе ничего не даёт.
+  // Первые burnBaseTiles фишек по базовой ставке, каждая сверх — по повышенной
+  // (10 -> 10, 13 -> 16, 20 -> 30). Множителя цепочки нет (ADR-0004).
+  scoring:   { burnBaseTiles: 10, pointsPerTileBase: 1, pointsPerTileOver: 2,
+               coinsPerBurnedTile: 1 },
+  // Милосердие — «мягкий старт»: работает только до disableAfterScore очков
+  mercy:     { threshold: 2, disableAfterScore: 300 },
+  animation: { waveStepMs: 150, burnFlashMs: 200, landingMs: 110,
+               landingScale: 1.22, burnFlashGrow: 0.45, ringGrowMs: 420 },
+  // Камера: панорама и зум поля. Игра работает и без них — поле всегда вписано.
+  // Поворот поля: перетаскивание по полю вращает его вокруг центра, при отпускании
+  // угол примагничивается к ближайшему кратному 60° (симметрия гекса).
+  camera:    { snapStepDeg: 60, snapMs: 200, minDragToRotate: 6,
+               resetButton: { size: 44, margin: 18 } },
+  // Бусты за монеты. Сгорание десятки даёт 10 монет — буст стоит 2-4 сгорания.
+  boosts:    [
+               { kind: 'move',   cost: 25, label: 'Перенос', hint: 'Выбери стопку, потом свободную ячейку' },
+               { kind: 'swap',   cost: 30, label: 'Обмен',   hint: 'Выбери две стопки для обмена' },
+               { kind: 'remove', cost: 40, label: 'Убрать',  hint: 'Выбери стопку, которую убрать' }
+             ],
+  // Платформа: SDK подгружается лениво и только на домене Яндекс Игр (ADR-0005).
+  // Локально и на обычном хостинге сеть не используется вообще.
+  platform:  { yandexHosts: ['yandex.net', 'yandex.ru', 'games.s3.yandex.net'],
+               sdkUrl: 'https://yandex.ru/games/sdk/v2',
+               leaderboardName: 'hexasort_score', leaderboardTop: 10 },
+  storage:   { bestKey: 'hexasort_best', coinsKey: 'hexasort_coins',
+               // версия экономики: при её росте прежний рекорд несопоставим с новой
+               // шкалой и сбрасывается один раз (ADR-0004)
+               economyKey: 'hexasort_economy', economyVersion: 2,
+               themeKey: 'hexasort_theme' },
+
+  // Оформление и геометрия отрисовки
+  ui: {
+    bg: '#1E2A3A',
+    cellFill: '#2C3E50',
+    cellStroke: '#34495E',
+    text: '#ECF0F1',
+    textDim: '#7F8C9A',
+    // вертикальный коридор, в который вписывается поле любого радиуса
+    boardArea: { top: 90, bottom: 610, sideMargin: 20 },
+    scoreY: 62,
+    bestY: 40,
+    coinsY: 40,              // кошелёк слева, симметрично рекорду справа
+    coinsX: 24,
+    coinColor: '#F1C40F',
+    coinRadius: 9,
+    hintY: 655,
+    hintText: 'Ставь стопку рядом с таким же цветом',
+    handY: 782,              // центр ряда слотов руки
+    handSlotSpacing: 175,    // расстояние между центрами слотов
+    handHexSize: 42,
+    // панель бустов под рукой
+    boostBar: { y: 846, w: 214, h: 42, gap: 10, radius: 11,
+                fill: '#2C3E50', fillActive: '#3A5068', stroke: '#34495E',
+                strokeActive: '#8FA8BF' },
+    // Перетаскивание
+    dragLift: 45,            // стопка держится выше курсора/пальца, px
+    highlightFill: '#3A5068',
+    highlightStroke: '#8FA8BF',
+    // Оверлей конца игры
+    overlayBg: 'rgba(30, 42, 58, 0.88)',
+    buttonFill: '#3498DB',
+    buttonFillDark: '#2980B9',
+    buttonW: 240,
+    buttonH: 66,
+    buttonOffsetY: 130,      // от центра канваса вниз
+    buttonRadius: 14
+  },
+  // Псевдо-3D стопки: слои со смещением вверх, верхняя фишка видна целиком
+  tile: {
+    scale: 0.86,             // размер фишки относительно ячейки
+    layerOffset: 7,          // сдвиг каждого следующего слоя вверх, px
+    maxRise: 48,             // насколько высоко стопка может подняться над ячейкой:
+                             // столько же резервируется над полем, чтобы высокие
+                             // стопки не срезались верхней границей
+    maxVisibleLayers: 12,    // защита от «небоскрёбов» при больших блоках
+    strokeWidth: 2,
+    shadeStroke: -0.28,      // обводка фишки на 1-2 тона темнее заливки
+    shadeSide: -0.18         // бок фишки (нижние слои) чуть темнее
+  }
+};
+
+// ============================================================================
+// themes — визуальные стили (Phase 12). Тема задаёт палитру, цвета интерфейса и
+// три функции отрисовки: фон, пустая ячейка, фишка. Остальной render не знает,
+// какой стиль включён, — он работает через CONFIG.ui и THEME.
+// ============================================================================
+const THEMES = {
+
+  // --- Бумажный крафт: фактура бумаги, неровные вырезанные края --------------
+  paper: {
+    name: 'Бумажный крафт',
+    palette: ['#D1495B', '#3A7CA5', '#5B8C5A', '#E9C46A', '#8E7DBE',
+              '#E07A5F', '#5AA9A3', '#C97BA0', '#F7F3E8', '#9C7A5B'],
+    geometry: { scale: 0.84, layerOffset: 9 },
+    ui: {
+      bg: '#EFE6D5', cellFill: '#E2D6BF', cellStroke: '#C7B393',
+      text: '#3B3226', textDim: '#8A7A63',
+      highlightFill: '#F6EDD8', highlightStroke: '#8A7A63',
+      overlayBg: 'rgba(239, 230, 213, 0.92)', overlayText: '#3B3226',
+      buttonFill: '#3A7CA5', buttonFillDark: '#2C5F7F', coinColor: '#E9C46A'
+    },
+    boostBar: { fill: '#E2D6BF', fillActive: '#F6EDD8',
+                stroke: '#C7B393', strokeActive: '#8A7A63' },
+
+    // фон рисуется один раз и кэшируется: 9000 крупинок каждый кадр — дорого
+    background(ctx) {
+      ctx.fillStyle = '#EFE6D5';
+      ctx.fillRect(0, 0, CONFIG.canvas.width, CONFIG.canvas.height);
+      for (let i = 0; i < 7000; i++) {
+        ctx.fillStyle = render.noise(i, 3) > 0.5
+          ? 'rgba(120,100,70,0.06)' : 'rgba(255,255,255,0.5)';
+        ctx.fillRect(render.noise(i, 1) * CONFIG.canvas.width,
+          render.noise(i, 2) * CONFIG.canvas.height, 2, 2);
+      }
+    },
+
+    // края «вырезаны ножницами»: вершины гекса чуть дрожат по детерминированному шуму
+    wobbleHex(ctx, cx, cy, size, seed) {
+      const points = hexMath.hexCorners(cx, cy, size);
+      ctx.beginPath();
+      points.forEach((point, i) => {
+        const dx = (render.noise(seed + i, 7) - 0.5) * 4.5;
+        const dy = (render.noise(seed + i, 9) - 0.5) * 4.5;
+        if (i === 0) ctx.moveTo(point.x + dx, point.y + dy);
+        else ctx.lineTo(point.x + dx, point.y + dy);
+      });
+      ctx.closePath();
+    },
+
+    emptyCell(ctx, cell, size, fill, stroke) {
+      const seed = cell.q * 17 + cell.r * 43;
+      THEMES.paper.wobbleHex(ctx, cell.pixelX, cell.pixelY, size, seed);
+      ctx.fillStyle = fill;
+      ctx.fill();
+      ctx.strokeStyle = stroke;
+      ctx.lineWidth = 2.5;
+      ctx.stroke();
+    },
+
+    tile(ctx, x, y, size, color, isTop, seed) {
+      ctx.save();
+      ctx.shadowColor = 'rgba(60, 45, 30, 0.35)';
+      ctx.shadowBlur = 7;
+      ctx.shadowOffsetY = 3;
+      THEMES.paper.wobbleHex(ctx, x, y, size, seed);
+      ctx.fillStyle = isTop ? color : render.shade(color, -0.12);
+      ctx.fill();
+      ctx.restore();
+      THEMES.paper.wobbleHex(ctx, x, y, size, seed);
+      ctx.strokeStyle = render.shade(color, -0.35);
+      ctx.lineWidth = 2;
+      ctx.stroke();
+    }
+  },
+
+  // --- Аниме 90-х: градиентное небо, лучи, полутон, cel-shading -------------
+  anime: {
+    name: 'Аниме 90-х',
+    palette: ['#FF4D6D', '#3FA9F5', '#4BE38A', '#FFD93D', '#C77DFF',
+              '#FF922B', '#38E8E0', '#FF7AC6', '#FFFFFF', '#B07A50'],
+    geometry: { scale: 0.85, layerOffset: 10 },
+    ui: {
+      bg: '#9AD2FF', cellFill: 'rgba(255,255,255,0.38)', cellStroke: '#1B2A4A',
+      text: '#14203A', textDim: '#41608F',
+      highlightFill: 'rgba(255,255,255,0.72)', highlightStroke: '#FFFFFF',
+      overlayBg: 'rgba(20, 32, 58, 0.88)', overlayText: '#FFFFFF',
+      buttonFill: '#FF4D6D', buttonFillDark: '#C42B4C', coinColor: '#FFD93D'
+    },
+    boostBar: { fill: '#1B2A4A', fillActive: '#FF4D6D',
+                stroke: '#14203A', strokeActive: '#FFFFFF' },
+
+    background(ctx) {
+      const W = CONFIG.canvas.width;
+      const H = CONFIG.canvas.height;
+      const sky = ctx.createLinearGradient(0, 0, 0, H);
+      sky.addColorStop(0, '#FFD3E0');
+      sky.addColorStop(0.45, '#9AD2FF');
+      sky.addColorStop(1, '#2F6FB5');
+      ctx.fillStyle = sky;
+      ctx.fillRect(0, 0, W, H);
+
+      // лучи из центра поля
+      ctx.save();
+      ctx.translate(W / 2, H * 0.42);
+      for (let i = 0; i < 24; i++) {
+        const angle = (i / 24) * Math.PI * 2;
+        ctx.beginPath();
+        ctx.moveTo(0, 0);
+        ctx.arc(0, 0, 1000, angle, angle + 0.085);
+        ctx.closePath();
+        ctx.fillStyle = 'rgba(255,255,255,0.15)';
+        ctx.fill();
+      }
+      ctx.restore();
+
+      // полутоновая сетка, густеющая книзу
+      for (let y = 0; y < H; y += 12) {
+        for (let x = 0; x < W; x += 12) {
+          if (render.noise(x, y) < (y / H) * 0.5) {
+            ctx.beginPath();
+            ctx.arc(x, y, 2.2, 0, Math.PI * 2);
+            ctx.fillStyle = 'rgba(40, 60, 120, 0.2)';
+            ctx.fill();
+          }
+        }
+      }
+    },
+
+    emptyCell(ctx, cell, size, fill, stroke) {
+      render.hexPath(cell.pixelX, cell.pixelY, size);
+      ctx.fillStyle = fill;
+      ctx.fill();
+      ctx.strokeStyle = stroke;
+      ctx.lineWidth = 3;
+      ctx.stroke();
+    },
+
+    tile(ctx, x, y, size, color, isTop) {
+      render.hexPath(x, y, size);
+      ctx.fillStyle = isTop ? color : render.shade(color, -0.35);
+      ctx.fill();
+      if (isTop) {
+        // жёсткая граница света и тени — приём cel-shading
+        ctx.save();
+        render.hexPath(x, y, size);
+        ctx.clip();
+        ctx.beginPath();
+        ctx.moveTo(x - size, y + size * 0.15);
+        ctx.lineTo(x + size, y - size * 0.05);
+        ctx.lineTo(x + size, y + size);
+        ctx.lineTo(x - size, y + size);
+        ctx.closePath();
+        ctx.fillStyle = render.shade(color, -0.3);
+        ctx.fill();
+        ctx.restore();
+        ctx.beginPath();
+        ctx.ellipse(x - size * 0.3, y - size * 0.38, size * 0.26, size * 0.13,
+          -0.5, 0, Math.PI * 2);
+        ctx.fillStyle = 'rgba(255,255,255,0.85)';
+        ctx.fill();
+      }
+      render.hexPath(x, y, size);
+      ctx.strokeStyle = '#14203A';
+      ctx.lineWidth = isTop ? 4 : 2.5;
+      ctx.stroke();
+    }
+  }
+};
+
+let THEME = THEMES.paper;
+
+// ============================================================================
+// Platform — единственная точка доступа к сохранению и будущим SDK.
+// Игра нигде не обращается к localStorage напрямую.
+// ============================================================================
+const Platform = {
+  // Общая работа с хранилищем: приватный режим или отключённое хранилище не должны
+  // ломать игру — просто живём без сохранений.
+  save(key, value) {
+    try {
+      localStorage.setItem(key, String(value));
+    } catch (e) {
+      /* нет доступа к хранилищу — игнорируем */
+    }
+  },
+  loadNumber(key) {
+    try {
+      const value = parseInt(localStorage.getItem(key), 10);
+      return Number.isFinite(value) ? value : 0;
+    } catch (e) {
+      return 0;
+    }
+  },
+
+  saveBest(value) { Platform.save(CONFIG.storage.bestKey, value); },
+  loadBest() { return Platform.loadNumber(CONFIG.storage.bestKey); },
+
+  // Кошелёк живёт между партиями, как рекорд
+  saveCoins(value) { Platform.save(CONFIG.storage.coinsKey, value); },
+  loadCoins() { return Platform.loadNumber(CONFIG.storage.coinsKey); },
+
+  // Выбранный визуальный стиль (Phase 12)
+  saveTheme(name) { Platform.save(CONFIG.storage.themeKey, name); },
+  loadTheme() {
+    try {
+      const name = localStorage.getItem(CONFIG.storage.themeKey);
+      return THEMES[name] ? name : null;
+    } catch (e) {
+      return null;
+    }
+  },
+
+  // Смена экономики обесценивает прежний рекорд: в старой шкале сгорание давало
+  // 100 очков, в новой — 10. Один раз сбрасываем рекорд, чтобы планка была честной.
+  migrateEconomy() {
+    const stored = Platform.loadNumber(CONFIG.storage.economyKey);
+    if (stored >= CONFIG.storage.economyVersion) return false;
+    Platform.saveBest(0);
+    Platform.save(CONFIG.storage.economyKey, CONFIG.storage.economyVersion);
+    return true;
+  },
+  showAd() { /* заглушка под SDK Яндекс/CrazyGames (v2) */ },
+  onPause() { /* заглушка под SDK Яндекс/CrazyGames (v2) */ },
+
+  // --- Глобальный рейтинг через SDK платформы (ADR-0005) --------------------
+  // Игра остаётся одним файлом: SDK не входит в артефакт и подгружается только
+  // на домене Яндекса. Любая ошибка платформы не должна ломать партию.
+  sdk: null,
+  leaderboards: null,
+
+  onYandexHost() {
+    try {
+      return CONFIG.platform.yandexHosts.some(host => location.host.endsWith(host));
+    } catch (e) {
+      return false;
+    }
+  },
+
+  initPlatform() {
+    if (!Platform.onYandexHost()) return false;
+    const script = document.createElement('script');
+    script.src = CONFIG.platform.sdkUrl;
+    script.onload = () => {
+      // YaGames появляется глобально после загрузки скрипта
+      if (typeof YaGames === 'undefined') return;
+      YaGames.init()
+        .then(sdk => {
+          Platform.sdk = sdk;
+          return sdk.getLeaderboards();
+        })
+        .then(leaderboards => { Platform.leaderboards = leaderboards; })
+        .catch(() => { /* платформа недоступна — играем без рейтинга */ });
+    };
+    document.head.appendChild(script);
+    return true;
+  },
+
+  // Отправить результат. Молча ничего не делает, если рейтинга нет.
+  submitScore(score) {
+    if (!Platform.leaderboards || score <= 0) return false;
+    try {
+      Platform.leaderboards.setLeaderboardScore(CONFIG.platform.leaderboardName, score);
+      return true;
+    } catch (e) {
+      return false;
+    }
+  },
+
+  // Прочитать топ и место игрока. Возвращает промис с данными или с признаком,
+  // что рейтинг недоступен (локальная версия).
+  fetchLeaderboard() {
+    if (!Platform.leaderboards) {
+      return Promise.resolve({ available: false, entries: [] });
+    }
+    return Platform.leaderboards
+      .getLeaderboardEntries(CONFIG.platform.leaderboardName, {
+        quantityTop: CONFIG.platform.leaderboardTop,
+        includeUser: true
+      })
+      .then(result => ({
+        available: true,
+        playerRank: result.userRank || 0,
+        entries: (result.entries || []).map(entry => ({
+          rank: entry.rank,
+          score: entry.score,
+          name: (entry.player && entry.player.publicName) || 'Игрок'
+        }))
+      }))
+      .catch(() => ({ available: false, entries: [] }));
+  }
+};
+
+// ============================================================================
+// hexMath — axial-математика flat-top гексов (главный техриск, см. спеку §19)
+// ============================================================================
+const hexMath = {
+  // Текущая геометрия поля: размер гекса и центр. Пересчитывается при росте поля.
+  layout: { size: CONFIG.hex.maxSize, centerX: 360, centerY: 350, radius: 2 },
+
+  // Вписать поле радиуса R в отведённый коридор: по ширине нужно size*(3R+2),
+  // по высоте size*√3*(2R+1). Берём меньшее, но не больше hex.maxSize.
+  fitLayout(radius) {
+    const area = CONFIG.ui.boardArea;
+    const availWidth = CONFIG.canvas.width - area.sideMargin * 2;
+    // над полем резервируем место под высокие стопки: они растут вверх от ячейки
+    const availHeight = (area.bottom - area.top) - CONFIG.tile.maxRise;
+    const size = Math.min(
+      CONFIG.hex.maxSize,
+      availWidth / (3 * radius + 2),
+      availHeight / (Math.sqrt(3) * (2 * radius + 1))
+    );
+    const halfHeight = Math.sqrt(3) / 2 * size * (2 * radius + 1);
+    hexMath.layout = {
+      size,
+      centerX: CONFIG.canvas.width / 2,
+      // поле прижато к низу области, сверху остаётся зазор ровно под стопки
+      centerY: area.top + CONFIG.tile.maxRise + halfHeight,
+      radius
+    };
+    return hexMath.layout;
+  },
+
+  // Ключ ячейки для Map
+  key(q, r) {
+    return q + ',' + r;
+  },
+
+  // Центр ячейки в пикселях. flat-top: x = size*3/2*q, y = size*sqrt(3)*(r + q/2)
+  axialToPixel(q, r) {
+    const L = hexMath.layout;
+    return {
+      x: L.centerX + L.size * 1.5 * q,
+      y: L.centerY + L.size * Math.sqrt(3) * (r + q / 2)
+    };
+  },
+
+  // Обратное преобразование: пиксель → ячейка (нужно для перетаскивания, Phase 2)
+  pixelToAxial(x, y) {
+    const s = hexMath.layout.size;
+    const px = x - hexMath.layout.centerX;
+    const py = y - hexMath.layout.centerY;
+    const qf = (2 / 3) * px / s;
+    const rf = (-1 / 3) * px / s + (Math.sqrt(3) / 3) * py / s;
+    return hexMath.cubeRound(qf, rf);
+  },
+
+  // Округление дробных axial-координат через куб-координаты (иначе на границах врёт)
+  cubeRound(qf, rf) {
+    const sf = -qf - rf;
+    let q = Math.round(qf);
+    let r = Math.round(rf);
+    let s = Math.round(sf);
+    const dq = Math.abs(q - qf);
+    const dr = Math.abs(r - rf);
+    const ds = Math.abs(s - sf);
+    if (dq > dr && dq > ds) {
+      q = -r - s;
+    } else if (dr > ds) {
+      r = -q - s;
+    }
+    return { q, r };
+  },
+
+  // Ячейки поля радиуса R: 3R²+3R+1 штук, условие max(|q|, |r|, |q+r|) <= R
+  generateCells(radius) {
+    return hexMath.expandCells(new Map(), radius);
+  },
+
+  // Дорастить поле до нужного радиуса: существующие ячейки (и их стопки) остаются,
+  // недостающие добавляются пустыми. Пиксели пересчитываются у всех — размер гекса
+  // после роста меняется.
+  expandCells(cells, radius) {
+    for (let q = -radius; q <= radius; q++) {
+      for (let r = -radius; r <= radius; r++) {
+        if (Math.max(Math.abs(q), Math.abs(r), Math.abs(q + r)) > radius) continue;
+        const key = hexMath.key(q, r);
+        if (!cells.has(key)) cells.set(key, { q, r, stack: null, pixelX: 0, pixelY: 0 });
+      }
+    }
+    cells.forEach(cell => {
+      const p = hexMath.axialToPixel(cell.q, cell.r);
+      cell.pixelX = p.x;
+      cell.pixelY = p.y;
+    });
+    return cells;
+  },
+
+  // 6 соседей flat-top гекса (диагоналей у гексов нет)
+  NEIGHBOR_OFFSETS: [
+    { q: 1, r: 0 }, { q: 1, r: -1 }, { q: 0, r: -1 },
+    { q: -1, r: 0 }, { q: -1, r: 1 }, { q: 0, r: 1 }
+  ],
+  neighbors(q, r) {
+    return hexMath.NEIGHBOR_OFFSETS.map(o => ({ q: q + o.q, r: r + o.r }));
+  },
+
+  // Вершины flat-top гекса: углы 0°, 60°, ... 300°
+  hexCorners(cx, cy, size) {
+    const pts = [];
+    for (let i = 0; i < 6; i++) {
+      const a = Math.PI / 180 * (60 * i);
+      pts.push({ x: cx + size * Math.cos(a), y: cy + size * Math.sin(a) });
+    }
+    return pts;
+  }
+};
+
+// ============================================================================
+// generators — генерация стопок (mono/duo/tri по весам), стартовое заполнение
+// ============================================================================
+const generators = {
+  // Источник случайности. По умолчанию Math.random; QA может зафиксировать seed
+  // (ADR-0002) — тогда партия воспроизводится ход в ход.
+  rng: {
+    next: Math.random,
+    seed(value) {
+      let s = value >>> 0;
+      this.next = () => {                       // mulberry32 — короткий детерминированный PRNG
+        s = (s + 0x6D2B79F5) | 0;
+        let t = s;
+        t = Math.imul(t ^ (t >>> 15), t | 1);
+        t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+        return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+      };
+    }
+  },
+
+  randInt(min, max) {
+    return min + Math.floor(generators.rng.next() * (max - min + 1));
+  },
+
+  // Случайный цвет из активного набора
+  randomColor(activeColors) {
+    return generators.randInt(0, activeColors - 1);
+  },
+
+  // Текущая ступень сложности стопок по счёту (последняя подходящая)
+  stageFor(score) {
+    const stages = CONFIG.stack.stages;
+    let current = stages[0];
+    stages.forEach(stage => { if (score >= stage.fromScore) current = stage; });
+    return current;
+  },
+
+  // Тип стопки по весам ступени
+  pickStackType(w) {
+    const total = w.mono + w.duo + w.tri;
+    let roll = generators.rng.next() * total;
+    if ((roll -= w.mono) < 0) return 'mono';
+    if ((roll -= w.duo) < 0) return 'duo';
+    return 'tri';
+  },
+
+  // Стопка = массив цветов снизу вверх. Многоблочные типы собираются
+  // из блоков не меньше minBlockSize, соседние блоки разного цвета.
+  // Веса типов и диапазон высоты берутся из ступени по текущему счёту.
+  makeStack(activeColors, score, forcedTopColor) {
+    const stage = generators.stageFor(score || 0);
+    const type = generators.pickStackType(stage.weights);
+    const blocks = type === 'mono' ? 1 : (type === 'duo' ? 2 : 3);
+    const minBlock = CONFIG.stack.minBlockSize;
+    // Высота подбирается под тип: на N блоков нужно минимум N * minBlockSize фишек,
+    // иначе выпавший duo/tri молча превращался бы в стопку попроще
+    const needed = blocks * minBlock;
+    const minH = Math.max(stage.minHeight, needed);
+    const maxH = Math.max(stage.maxHeight, needed);
+    const height = generators.randInt(minH, maxH);
+
+    const tiles = [];
+    const usedColors = new Set();       // цвет не повторяется во всей стопке, а не
+    let left = height;                  // только в соседних блоках (правило пользователя)
+    for (let b = 0; b < blocks; b++) {
+      const isLast = b === blocks - 1;
+      const reserved = (blocks - 1 - b) * minBlock;   // хватит ли оставшимся блокам
+      const size = isLast ? left : generators.randInt(minBlock, left - reserved);
+      let color = generators.randomColor(activeColors);
+      let guard = 0;
+      while (usedColors.has(color) && usedColors.size < activeColors && guard++ < 50) {
+        color = generators.randomColor(activeColors);
+      }
+      usedColors.add(color);
+      for (let i = 0; i < size; i++) tiles.push(color);
+      left -= size;
+    }
+    // Милосердный генератор навязывает цвет верхнего блока
+    if (forcedTopColor !== undefined && forcedTopColor !== null) {
+      const top = tiles[tiles.length - 1];
+      for (let i = tiles.length - 1; i >= 0 && tiles[i] === top; i--) {
+        tiles[i] = forcedTopColor;
+      }
+    }
+    return { tiles, cell: null };
+  },
+
+  // Стартовое заполнение: round(19 * 0.30) = 6 случайных ячеек
+  fillStartBoard(state) {
+    const keys = Array.from(state.cells.keys());
+    const count = Math.round(keys.length * CONFIG.board.startFillPercent);
+    // перемешивание Фишера—Йетса, чтобы выбрать ячейки без повторов
+    for (let i = keys.length - 1; i > 0; i--) {
+      const j = generators.randInt(0, i);
+      const t = keys[i]; keys[i] = keys[j]; keys[j] = t;
+    }
+    for (let i = 0; i < count; i++) {
+      const cell = state.cells.get(keys[i]);
+      // стартовое поле всегда простое: первая ступень, одноцветные стопки
+      const stack = generators.makeStack(state.activeColors, 0);
+      stack.cell = { q: cell.q, r: cell.r };
+      cell.stack = stack;
+    }
+  },
+
+  // Свободные ячейки поля
+  freeCells(state) {
+    const free = [];
+    state.cells.forEach(cell => { if (!cell.stack) free.push(cell); });
+    return free;
+  },
+
+  // Новая раздача из 3 стопок. Пока счёт не превысил mercy.disableAfterScore и
+  // свободных ячеек мало, первая стопка гарантированно даёт цвет, уже лежащий
+  // наверху какой-то стопки на поле. Дальше игра перестаёт подыгрывать (ADR-0004).
+  dealHand(state) {
+    const mercyAllowed = state.score < CONFIG.mercy.disableAfterScore;
+    const merciful = mercyAllowed &&
+      generators.freeCells(state).length <= CONFIG.mercy.threshold;
+    let forced;
+    if (merciful) {
+      const tops = [];
+      state.cells.forEach(cell => {
+        if (cell.stack) tops.push(cell.stack.tiles[cell.stack.tiles.length - 1]);
+      });
+      if (tops.length) forced = tops[generators.randInt(0, tops.length - 1)];
+    }
+    for (let i = 0; i < 3; i++) {
+      state.hand.slots[i] = generators.makeStack(
+        state.activeColors, state.score, i === 0 ? forced : undefined);
+    }
+  }
+};
+
+// ============================================================================
+// mergeEngine — перелив, сгорание, волна BFS (ядро, Phase 3).
+// Сейчас реализована только вспомогательная topRun.
+// ============================================================================
+const mergeEngine = {
+  // Верхний одноцветный блок стопки: цвет и длина
+  topRun(stack) {
+    if (!stack || !stack.tiles.length) return { color: -1, length: 0 };
+    const color = stack.tiles[stack.tiles.length - 1];
+    let length = 0;
+    for (let i = stack.tiles.length - 1; i >= 0 && stack.tiles[i] === color; i--) length++;
+    return { color, length };
+  },
+
+  // Куда собирать блок после установки стопки в cell (правило пользователя):
+  //   • рядом две и больше одноцветных стопок — собираем в поставленную ячейку, потому
+  //     что только она соседствует со всеми, и объединятся сразу все;
+  //   • рядом ровно одна — новая стопка вливается в неё, а ячейка игрока освобождается;
+  //   • рядом ни одной — стопка просто остаётся на месте.
+  mergeTargetFor(state, cell) {
+    if (!cell.stack) return cell;
+    const color = mergeEngine.topRun(cell.stack).color;
+    const sameColorNeighbors = [];
+    hexMath.neighbors(cell.q, cell.r).forEach(n => {
+      const nb = state.cells.get(hexMath.key(n.q, n.r));
+      if (!nb || !nb.stack) return;
+      if (mergeEngine.topRun(nb.stack).color === color) sameColorNeighbors.push(nb);
+    });
+    if (sameColorNeighbors.length >= 2) return cell;
+    return sameColorNeighbors[0] || cell;
+  },
+
+  // Что перельётся в cell: верхние блоки соседей того же цвета, что верх cell.
+  // Порядок соседей фиксирован — от него зависит детерминизм волны.
+  computeFlows(state, cell) {
+    if (!cell.stack) return [];
+    const run = mergeEngine.topRun(cell.stack);
+    const flows = [];
+    hexMath.neighbors(cell.q, cell.r).forEach(n => {
+      const nb = state.cells.get(hexMath.key(n.q, n.r));
+      if (!nb || !nb.stack) return;
+      const nbRun = mergeEngine.topRun(nb.stack);
+      if (nbRun.color !== run.color) return;
+      flows.push({ from: nb, to: cell, color: nbRun.color, count: nbRun.length });
+    });
+    return flows;
+  },
+
+  // Снять верхние блоки с отдающих соседей; опустевшая ячейка освобождается
+  applyFlowRemoval(state, flows) {
+    flows.forEach(f => {
+      const stack = f.from.stack;
+      stack.tiles.length -= f.count;
+      if (!stack.tiles.length) f.from.stack = null;
+    });
+  },
+
+  // Долить фишки в целевую стопку; возвращает число перетёкших фишек
+  applyFlowArrival(state, cell, flows) {
+    let flowed = 0;
+    flows.forEach(f => {
+      for (let i = 0; i < f.count; i++) cell.stack.tiles.push(f.color);
+      flowed += f.count;
+    });
+    return flowed;
+  },
+
+  // Очки за сгоревший блок из N фишек: первые burnBaseTiles по базовой ставке,
+  // каждая сверх — по повышенной. Номер волны на очки не влияет (ADR-0004).
+  burnPointsFor(tiles) {
+    const s = CONFIG.scoring;
+    const base = Math.min(tiles, s.burnBaseTiles);
+    const over = Math.max(0, tiles - s.burnBaseTiles);
+    return base * s.pointsPerTileBase + over * s.pointsPerTileOver;
+  },
+
+  // Сгорание: верхний блок дорос до порога — горит целиком (13 → горят 13)
+  burnIfReady(state, cell, waveNumber) {
+    if (!cell.stack) return { burned: false };
+    const run = mergeEngine.topRun(cell.stack);
+    if (run.length < CONFIG.merge.burnThreshold) return { burned: false };
+    cell.stack.tiles.length -= run.length;
+    if (!cell.stack.tiles.length) cell.stack = null;
+    return {
+      burned: true, cell, color: run.color, count: run.length,
+      wave: waveNumber,                                  // нужен анимации, не очкам
+      points: mergeEngine.burnPointsFor(run.length),
+      coins: run.length * CONFIG.scoring.coinsPerBurnedTile
+    };
+  },
+
+  // Контекст цепочки: очередь центров притяжения текущей волны.
+  // Принимает одну ячейку или сразу несколько (обмен бустом меняет две).
+  createWave(start) {
+    return {
+      queue: Array.isArray(start) ? start.slice() : [start],
+      wave: 1,
+      iterations: 0
+    };
+  },
+
+  // Шаг волны, часть 1: посчитать переливы и снять фишки с соседей.
+  // Разделено на plan/commit, чтобы между ними проигралась анимация полёта.
+  planWave(state, ctx) {
+    const plan = { wave: ctx.wave, groups: [], flows: [] };
+    ctx.queue.forEach(cell => {
+      if (!cell.stack) return;
+      const flows = mergeEngine.computeFlows(state, cell);
+      if (flows.length) mergeEngine.applyFlowRemoval(state, flows);
+      plan.groups.push({ cell, flows });
+      flows.forEach(f => plan.flows.push(f));
+    });
+    return plan;
+  },
+
+  // Шаг волны, часть 2: долить фишки, сжечь дозревшие блоки, собрать
+  // изменённые ячейки в очередь следующей волны
+  commitWave(state, plan, ctx) {
+    let burnPoints = 0;
+    let burnCoins = 0;
+    let flowedTiles = 0;
+    const burns = [];
+    const changed = new Map();
+    const mark = (cell) => changed.set(hexMath.key(cell.q, cell.r), cell);
+
+    plan.groups.forEach(g => {
+      if (g.flows.length) {
+        // перелив только собирает блок; очки и монеты придут, когда он сгорит
+        flowedTiles += mergeEngine.applyFlowArrival(state, g.cell, g.flows);
+        mark(g.cell);
+        g.flows.forEach(f => mark(f.from));   // сосед открыл следующий цвет
+      }
+      const burn = mergeEngine.burnIfReady(state, g.cell, plan.wave);
+      if (burn.burned) {
+        burnPoints += burn.points;
+        burnCoins += burn.coins;              // монета за каждую сгоревшую фишку
+        burns.push(burn);
+        mark(g.cell);
+      }
+    });
+
+    // в следующую волну идут только ячейки, где после всех сгораний осталась стопка
+    ctx.queue = Array.from(changed.values()).filter(c => c.stack);
+    ctx.wave++;
+    return { burnPoints, burnCoins, flowedTiles, burns };
+  },
+
+  // Синхронное разрешение цепочки без анимации — источник правды по детерминизму
+  // (тот же набор примитивов, что и у анимационного драйвера в main)
+  resolveWave(state, startCell) {
+    const ctx = mergeEngine.createWave(startCell);
+    const steps = [];
+    let totalPoints = 0;
+    let totalCoins = 0;
+    while (ctx.queue.length && ctx.iterations < CONFIG.merge.maxWaveIterations) {
+      ctx.iterations++;
+      const plan = mergeEngine.planWave(state, ctx);
+      const res = mergeEngine.commitWave(state, plan, ctx);
+      totalPoints += res.burnPoints;
+      totalCoins += res.burnCoins;
+      steps.push({
+        wave: plan.wave, flows: plan.flows.length, burns: res.burns.length,
+        points: res.burnPoints, coins: res.burnCoins
+      });
+    }
+    return { steps, totalPoints, totalCoins, waves: ctx.iterations };
+  }
+};
+
+// ============================================================================
+// render — гексы, псевдо-3D стопки, рука, HUD, оверлей
+// ============================================================================
+const render = {
+  ctx: null,
+  backgroundCache: null,     // фон темы рисуется один раз и копируется
+
+  // Детерминированный шум — фактура бумаги, полутон, дизеринг
+  noise(x, y) {
+    const v = Math.sin(x * 12.9898 + y * 78.233) * 43758.5453;
+    return v - Math.floor(v);
+  },
+
+  // Затемнение/осветление цвета: amount < 0 темнее, > 0 светлее
+  shade(hex, amount) {
+    if (hex[0] !== '#') return hex;       // rgba(...) из темы оставляем как есть
+    const num = parseInt(hex.slice(1), 16);
+    const ch = [num >> 16 & 255, num >> 8 & 255, num & 255].map(c => {
+      const v = amount < 0 ? c * (1 + amount) : c + (255 - c) * amount;
+      return Math.max(0, Math.min(255, Math.round(v)));
+    });
+    return 'rgb(' + ch[0] + ',' + ch[1] + ',' + ch[2] + ')';
+  },
+
+  // Контур гекса как path
+  hexPath(cx, cy, size) {
+    const ctx = render.ctx;
+    const pts = hexMath.hexCorners(cx, cy, size);
+    ctx.beginPath();
+    ctx.moveTo(pts[0].x, pts[0].y);
+    for (let i = 1; i < 6; i++) ctx.lineTo(pts[i].x, pts[i].y);
+    ctx.closePath();
+  },
+
+  // Пустая ячейка поля
+  drawHex(cx, cy, size, fill, stroke) {
+    const ctx = render.ctx;
+    render.hexPath(cx, cy, size);
+    ctx.fillStyle = fill;
+    ctx.fill();
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = stroke;
+    ctx.stroke();
+  },
+
+  // Псевдо-3D стопка: слои снизу вверх, каждый следующий выше на layerOffset.
+  // Нижние слои перекрыты — видны только их «бока», верхняя фишка целиком.
+  // Стопка рисуется в ЭКРАННЫХ координатах: слои всегда идут вверх экрана, как бы ни
+  // было повёрнуто поле. Сама фишка при этом поворачивается вокруг своего центра,
+  // чтобы совпадать с ячейкой под ней.
+  drawStack(stack, cx, cy, cellSize, seed, rotation) {
+    const ctx = render.ctx;
+    const t = CONFIG.tile;
+    const size = cellSize * t.scale;
+    const total = stack.tiles.length;
+    const visible = Math.min(total, t.maxVisibleLayers);
+    const skipped = total - visible;
+    const angle = rotation || 0;
+    // высокая стопка «сжимает» слои, чтобы не вылезти за отведённую высоту
+    const step = visible > 1
+      ? Math.min(t.layerOffset, t.maxRise / (visible - 1))
+      : t.layerOffset;
+
+    for (let i = 0; i < visible; i++) {
+      const color = CONFIG.colors.palette[stack.tiles[skipped + i]];
+      const y = cy - i * step;
+      const isTop = i === visible - 1;
+      if (angle) {
+        ctx.save();
+        ctx.translate(cx, y);
+        ctx.rotate(angle);
+        ctx.translate(-cx, -y);
+      }
+      // саму фишку рисует активная тема (Phase 12)
+      THEME.tile(ctx, cx, y, size, color, isTop, (seed || 0) + i * 5);
+      if (angle) ctx.restore();
+    }
+  },
+
+  // Поле: сначала пустые ячейки, потом стопки сверху вниз по экрану,
+  // чтобы верхние ряды не перекрывали растущие стопки нижних
+  drawBoard(state) {
+    const ctx = render.ctx;
+    const size = hexMath.layout.size;
+    state.cells.forEach(cell => {
+      const key = hexMath.key(cell.q, cell.r);
+      // ячейка под перетаскиваемой стопкой подсвечивается
+      const isHover = state.hoverKey === key;
+      // ячейки только что открывшегося кольца проявляются и подрастают
+      const ring = state.newRing;
+      const fresh = ring && ring.keys.has(key);
+      if (fresh) ctx.globalAlpha = ring.t;
+      THEME.emptyCell(ctx, cell, fresh ? size * (0.6 + 0.4 * ring.t) : size,
+        isHover ? CONFIG.ui.highlightFill : CONFIG.ui.cellFill,
+        isHover ? CONFIG.ui.highlightStroke : CONFIG.ui.cellStroke);
+      if (fresh) ctx.globalAlpha = 1;
+    });
+  },
+
+  // Стопки — отдельным слоем в экранных координатах (см. drawStack).
+  // Порядок — по экранному Y, иначе при повороте перекрытие пойдёт наоборот.
+  drawStacks(state) {
+    const size = hexMath.layout.size;
+    const rotation = state.camera.rotation;
+    const occupied = [];
+    state.cells.forEach(cell => {
+      if (!cell.stack) return;
+      const screen = input.worldToScreen(state, cell.pixelX, cell.pixelY);
+      occupied.push({ cell, screen });
+    });
+    occupied.sort((a, b) => a.screen.y - b.screen.y);
+    occupied.forEach(({ cell, screen }) => {
+      // «приземление»: только что поставленная стопка приходит из увеличенного масштаба
+      const land = state.landing;
+      const scale = land && land.cell === cell
+        ? 1 + (CONFIG.animation.landingScale - 1) * (1 - land.t)
+        : 1;
+      render.drawStack(cell.stack, screen.x, screen.y, size * scale,
+        cell.q * 31 + cell.r * 57, rotation);
+    });
+  },
+
+  // Вспышка на месте сгоревшего блока: гекс расходится и гаснет (экранные координаты)
+  drawBurns(state) {
+    const anim = state.burnAnim;
+    if (!anim) return;
+    const ctx = render.ctx;
+    const t = anim.t;
+    anim.burns.forEach(b => {
+      const screen = input.worldToScreen(state, b.cell.pixelX, b.cell.pixelY);
+      const size = hexMath.layout.size * (1 + CONFIG.animation.burnFlashGrow * t);
+      ctx.globalAlpha = 1 - t;
+      render.hexPath(screen.x, screen.y, size);
+      ctx.fillStyle = render.shade(CONFIG.colors.palette[b.color], 0.65);
+      ctx.fill();
+      ctx.globalAlpha = 1;
+    });
+  },
+
+  // Центр слота руки — геометрия нужна и отрисовке, и вводу
+  handSlotCenter(index) {
+    const ui = CONFIG.ui;
+    return {
+      x: CONFIG.canvas.width / 2 + (index - 1) * ui.handSlotSpacing,
+      y: ui.handY
+    };
+  },
+
+  // Рука: 3 слота внизу, пустой слот — рамка
+  drawHand(state) {
+    const ui = CONFIG.ui;
+    const size = ui.handHexSize;
+    for (let i = 0; i < 3; i++) {
+      const c = render.handSlotCenter(i);
+      const cx = c.x;
+      const cy = c.y;
+      const stack = state.hand.slots[i];
+      if (stack) {
+        render.drawStack(stack, cx, cy, size);
+      } else {
+        render.drawHex(cx, cy, size, 'transparent', CONFIG.ui.cellStroke);
+      }
+    }
+  },
+
+  // HUD: счёт по центру сверху, рекорд мельче в углу, подсказка под полем
+  drawHUD(state) {
+    const ctx = render.ctx;
+    const ui = CONFIG.ui;
+
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = ui.text;
+    ctx.font = 'bold 52px system-ui, sans-serif';
+    ctx.fillText(String(state.score), CONFIG.canvas.width / 2, ui.scoreY);
+
+    ctx.textAlign = 'right';
+    ctx.fillStyle = ui.textDim;
+    ctx.font = '20px system-ui, sans-serif';
+    ctx.fillText('Рекорд: ' + state.best, CONFIG.canvas.width - 24, ui.bestY);
+
+    render.drawCoins(state);
+
+    // активный буст объясняет, что выбирать; иначе стартовая подсказка
+    const boostHint = state.boost ? input.boostConfig(state.boost.kind).hint : null;
+    if (boostHint || state.showHint) {
+      ctx.textAlign = 'center';
+      ctx.fillStyle = boostHint ? ui.text : ui.textDim;
+      ctx.font = '20px system-ui, sans-serif';
+      ctx.fillText(boostHint || ui.hintText, CONFIG.canvas.width / 2, ui.hintY);
+    }
+  },
+
+  // Летящие при переливе фишки: мини-стопка едет от соседа к цели (экранные координаты)
+  drawFlows(state) {
+    const anim = state.anim;
+    if (!anim) return;
+    const t = anim.t;
+    const ease = t * t * (3 - 2 * t);        // плавный разгон и торможение
+    anim.flows.forEach(f => {
+      const from = input.worldToScreen(state, f.from.pixelX, f.from.pixelY);
+      const to = input.worldToScreen(state, f.to.pixelX, f.to.pixelY);
+      render.drawStack({ tiles: new Array(f.count).fill(f.color) },
+        from.x + (to.x - from.x) * ease,
+        from.y + (to.y - from.y) * ease,
+        hexMath.layout.size, 0, state.camera.rotation);
+    });
+  },
+
+  // Перетаскиваемая стопка — поверх всего, в размере ячейки поля (экранные координаты)
+  drawDrag(state) {
+    const d = state.drag;
+    if (!d) return;
+    const screen = input.worldToScreen(state, d.x, d.y);
+    render.drawStack(d.stack, screen.x, screen.y, hexMath.layout.size, 0,
+      state.camera.rotation);
+  },
+
+  // Кошелёк: монетка и число слева сверху
+  drawCoins(state) {
+    const ctx = render.ctx;
+    const ui = CONFIG.ui;
+    const cx = ui.coinsX + ui.coinRadius;
+
+    ctx.beginPath();
+    ctx.arc(cx, ui.coinsY, ui.coinRadius, 0, Math.PI * 2);
+    ctx.fillStyle = ui.coinColor;
+    ctx.fill();
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = render.shade(ui.coinColor, -0.3);
+    ctx.stroke();
+
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = ui.text;
+    ctx.font = '20px system-ui, sans-serif';
+    ctx.fillText(String(state.coins), cx + ui.coinRadius + 8, ui.coinsY);
+  },
+
+  // Прямоугольник кнопки «Заново» — геометрия нужна и отрисовке, и вводу
+  restartButtonRect() {
+    const ui = CONFIG.ui;
+    return {
+      x: CONFIG.canvas.width / 2 - ui.buttonW / 2,
+      y: CONFIG.canvas.height / 2 + ui.buttonOffsetY,
+      w: ui.buttonW,
+      h: ui.buttonH
+    };
+  },
+
+  // Кнопка «Рейтинг» на оверлее конца — над кнопкой «Заново»
+  leaderboardButtonRect() {
+    const btn = render.restartButtonRect();
+    return { x: btn.x, y: btn.y - btn.h - 14, w: btn.w, h: btn.h - 12 };
+  },
+
+  // Экран рейтинга поверх оверлея конца партии
+  drawLeaderboard(state) {
+    const board = state.leaderboard;
+    if (!board || !board.open) return;
+    const ctx = render.ctx;
+    const ui = CONFIG.ui;
+    const W = CONFIG.canvas.width;
+    const H = CONFIG.canvas.height;
+
+    ctx.fillStyle = 'rgba(12, 18, 30, 0.94)';
+    ctx.fillRect(0, 0, W, H);
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = '#FFFFFF';
+    ctx.font = 'bold 34px system-ui, sans-serif';
+    ctx.fillText('Рейтинг', W / 2, 120);
+
+    if (board.loading) {
+      ctx.font = '20px system-ui, sans-serif';
+      ctx.fillStyle = '#9FB0C4';
+      ctx.fillText('Загружаем…', W / 2, H / 2);
+    } else if (!board.available) {
+      // локальная версия: сети нет и быть не должно (ADR-0005)
+      ctx.font = '20px system-ui, sans-serif';
+      ctx.fillStyle = '#9FB0C4';
+      ctx.fillText('Глобальный рейтинг работает', W / 2, H / 2 - 40);
+      ctx.fillText('в версии для Яндекс Игр', W / 2, H / 2 - 12);
+      ctx.fillStyle = '#FFFFFF';
+      ctx.font = 'bold 30px system-ui, sans-serif';
+      ctx.fillText('Твой рекорд: ' + state.best, W / 2, H / 2 + 46);
+    } else {
+      ctx.font = '20px system-ui, sans-serif';
+      board.entries.forEach((entry, i) => {
+        const y = 190 + i * 40;
+        const isPlayer = board.playerRank && entry.rank === board.playerRank;
+        ctx.fillStyle = isPlayer ? ui.coinColor : '#D5DEE9';
+        ctx.textAlign = 'left';
+        ctx.fillText(entry.rank + '.', 120, y);
+        ctx.fillText(entry.name.slice(0, 18), 170, y);
+        ctx.textAlign = 'right';
+        ctx.fillText(String(entry.score), W - 120, y);
+      });
+      if (board.playerRank) {
+        ctx.textAlign = 'center';
+        ctx.fillStyle = ui.coinColor;
+        ctx.font = '22px system-ui, sans-serif';
+        ctx.fillText('Твоё место: ' + board.playerRank, W / 2, 190 + board.entries.length * 40 + 30);
+      }
+    }
+
+    const back = render.restartButtonRect();
+    render.roundRectPath(back.x, back.y, back.w, back.h, ui.buttonRadius);
+    ctx.fillStyle = ui.buttonFill;
+    ctx.fill();
+    ctx.textAlign = 'center';
+    ctx.fillStyle = '#FFFFFF';
+    ctx.font = 'bold 24px system-ui, sans-serif';
+    ctx.fillText('Назад', back.x + back.w / 2, back.y + back.h / 2 + 1);
+  },
+
+  // Скруглённый прямоугольник (roundRect есть не везде — рисуем сами)
+  roundRectPath(x, y, w, h, r) {
+    const ctx = render.ctx;
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.arcTo(x + w, y, x + w, y + h, r);
+    ctx.arcTo(x + w, y + h, x, y + h, r);
+    ctx.arcTo(x, y + h, x, y, r);
+    ctx.arcTo(x, y, x + w, y, r);
+    ctx.closePath();
+  },
+
+  // Оверлей конца игры: счёт, рекорд, кнопка «Заново»
+  drawGameOver(state) {
+    const ctx = render.ctx;
+    const ui = CONFIG.ui;
+    const W = CONFIG.canvas.width;
+    const H = CONFIG.canvas.height;
+
+    ctx.fillStyle = ui.overlayBg;
+    ctx.fillRect(0, 0, W, H);
+
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = ui.text;
+    ctx.font = 'bold 46px system-ui, sans-serif';
+    ctx.fillText('Игра окончена', W / 2, H / 2 - 90);
+
+    ctx.font = 'bold 64px system-ui, sans-serif';
+    ctx.fillText(String(state.score), W / 2, H / 2 - 20);
+    ctx.font = '22px system-ui, sans-serif';
+    ctx.fillStyle = ui.textDim;
+    ctx.fillText('очков', W / 2, H / 2 + 22);
+
+    // новый рекорд отмечаем явно — это единственная мета-прогрессия в игре
+    ctx.font = '24px system-ui, sans-serif';
+    ctx.fillStyle = state.score >= state.best && state.score > 0 ? ui.text : ui.textDim;
+    const bestLine = state.score >= state.best && state.score > 0
+      ? 'Новый рекорд: ' + state.best
+      : 'Рекорд: ' + state.best;
+    ctx.fillText(bestLine, W / 2, H / 2 + 58);
+
+    ctx.font = '20px system-ui, sans-serif';
+    ctx.fillStyle = ui.textDim;
+    ctx.fillText('В кошельке монет: ' + state.coins, W / 2, H / 2 + 90);
+
+    const rating = render.leaderboardButtonRect();
+    render.roundRectPath(rating.x, rating.y, rating.w, rating.h, ui.buttonRadius);
+    ctx.fillStyle = 'transparent';
+    ctx.fill();
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = ui.overlayText;
+    ctx.stroke();
+    ctx.fillStyle = ui.overlayText;
+    ctx.font = '20px system-ui, sans-serif';
+    ctx.fillText('Рейтинг', rating.x + rating.w / 2, rating.y + rating.h / 2 + 1);
+
+    const btn = render.restartButtonRect();
+    render.roundRectPath(btn.x, btn.y, btn.w, btn.h, ui.buttonRadius);
+    ctx.fillStyle = ui.buttonFill;
+    ctx.fill();
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = ui.buttonFillDark;
+    ctx.stroke();
+    ctx.fillStyle = ui.text;
+    ctx.font = 'bold 26px system-ui, sans-serif';
+    ctx.fillText('Заново', btn.x + btn.w / 2, btn.y + btn.h / 2 + 1);
+  },
+
+  // Прямоугольник кнопки буста по индексу — нужен и отрисовке, и вводу
+  boostButtonRect(index) {
+    const bar = CONFIG.ui.boostBar;
+    const count = CONFIG.boosts.length;
+    const totalWidth = count * bar.w + (count - 1) * bar.gap;
+    const left = (CONFIG.canvas.width - totalWidth) / 2;
+    return { x: left + index * (bar.w + bar.gap), y: bar.y, w: bar.w, h: bar.h };
+  },
+
+  // Панель бустов: название, цена и монетка. Недоступный буст приглушён,
+  // активный — подсвечен.
+  drawBoostBar(state) {
+    const ctx = render.ctx;
+    const bar = CONFIG.ui.boostBar;
+    CONFIG.boosts.forEach((boost, index) => {
+      const rect = render.boostButtonRect(index);
+      const active = state.boost && state.boost.kind === boost.kind;
+      const affordable = state.coins >= boost.cost;
+
+      render.roundRectPath(rect.x, rect.y, rect.w, rect.h, bar.radius);
+      ctx.fillStyle = active ? bar.fillActive : bar.fill;
+      ctx.fill();
+      ctx.lineWidth = 2;
+      ctx.strokeStyle = active ? bar.strokeActive : bar.stroke;
+      ctx.stroke();
+
+      ctx.globalAlpha = affordable ? 1 : 0.4;
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'middle';
+      ctx.fillStyle = CONFIG.ui.text;
+      ctx.font = 'bold 18px system-ui, sans-serif';
+      ctx.fillText(boost.label, rect.x + 16, rect.y + rect.h / 2);
+
+      // цена с монеткой у правого края кнопки
+      const coinX = rect.x + rect.w - 20;
+      ctx.beginPath();
+      ctx.arc(coinX, rect.y + rect.h / 2, 7, 0, Math.PI * 2);
+      ctx.fillStyle = CONFIG.ui.coinColor;
+      ctx.fill();
+      ctx.textAlign = 'right';
+      ctx.fillStyle = affordable ? CONFIG.ui.text : CONFIG.ui.textDim;
+      ctx.font = '17px system-ui, sans-serif';
+      ctx.fillText(String(boost.cost), coinX - 12, rect.y + rect.h / 2);
+      ctx.globalAlpha = 1;
+    });
+  },
+
+  // Подсветка ячеек, доступных для выбора активным бустом
+  drawBoostTargets(state) {
+    const boost = state.boost;
+    if (!boost) return;
+    const ctx = render.ctx;
+    const size = hexMath.layout.size;
+    state.cells.forEach(cell => {
+      if (!input.isBoostTarget(state, cell)) return;
+      render.hexPath(cell.pixelX, cell.pixelY, size * 0.97);
+      ctx.lineWidth = 3;
+      ctx.strokeStyle = CONFIG.ui.highlightStroke;
+      ctx.stroke();
+    });
+    // уже выбранная ячейка отмечается ярче
+    if (boost.from) {
+      render.hexPath(boost.from.pixelX, boost.from.pixelY, size * 0.97);
+      ctx.lineWidth = 4;
+      ctx.strokeStyle = CONFIG.ui.text;
+      ctx.stroke();
+    }
+  },
+
+  // Кнопка возврата обзора — в правом нижнем углу игрового поля
+  resetCameraButtonRect() {
+    const c = CONFIG.camera.resetButton;
+    return {
+      x: CONFIG.canvas.width - c.size - c.margin,
+      y: CONFIG.ui.boardArea.bottom - c.size,
+      w: c.size,
+      h: c.size
+    };
+  },
+
+  // Кнопка выбора стиля — левый нижний угол игровой области (временная, Phase 12)
+  themeButtonRect() {
+    const c = CONFIG.camera.resetButton;
+    return { x: c.margin, y: CONFIG.ui.boardArea.bottom - c.size, w: 132, h: c.size };
+  },
+
+  drawThemeButton(state) {
+    const ctx = render.ctx;
+    const b = render.themeButtonRect();
+    render.roundRectPath(b.x, b.y, b.w, b.h, 10);
+    ctx.fillStyle = CONFIG.ui.boostBar.fill;
+    ctx.fill();
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = CONFIG.ui.boostBar.stroke;
+    ctx.stroke();
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = CONFIG.ui.text;
+    ctx.font = '15px system-ui, sans-serif';
+    ctx.fillText('Стиль: ' + THEME.name.split(' ')[0], b.x + b.w / 2, b.y + b.h / 2);
+  },
+
+  // Значок возврата: виден только когда поле повёрнуто
+  drawResetCameraButton(state) {
+    if (Math.abs(state.camera.rotation) < 1e-6) return;
+    const ctx = render.ctx;
+    const b = render.resetCameraButtonRect();
+    render.roundRectPath(b.x, b.y, b.w, b.h, 10);
+    ctx.fillStyle = 'rgba(44, 62, 80, 0.85)';
+    ctx.fill();
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = CONFIG.ui.cellStroke;
+    ctx.stroke();
+    render.hexPath(b.x + b.w / 2, b.y + b.h / 2, b.w * 0.26);
+    ctx.fillStyle = CONFIG.ui.textDim;
+    ctx.fill();
+  },
+
+  // Поворот мира вокруг центра поля — общая трансформация для всех мировых слоёв
+  applyWorldTransform(state) {
+    const ctx = render.ctx;
+    const L = hexMath.layout;
+    ctx.translate(L.centerX, L.centerY);
+    ctx.rotate(state.camera.rotation);
+    ctx.translate(-L.centerX, -L.centerY);
+  },
+
+  // Фон темы: рисуется один раз в отдельный канвас и дальше просто копируется —
+  // бумажная крошка и полутон стоят тысяч операций и не должны идти каждый кадр
+  drawBackground(state) {
+    const ctx = render.ctx;
+    if (!render.backgroundCache) {
+      const buffer = document.createElement('canvas');
+      buffer.width = CONFIG.canvas.width;
+      buffer.height = CONFIG.canvas.height;
+      const bufferCtx = buffer.getContext('2d');
+      const previous = render.ctx;
+      render.ctx = bufferCtx;                 // тема рисует через render.*
+      THEME.background(bufferCtx);
+      render.ctx = previous;
+      render.backgroundCache = buffer;
+    }
+    ctx.drawImage(render.backgroundCache, 0, 0);
+  },
+
+  // Полный кадр: сначала мир под трансформом камеры, затем экранный слой поверх
+  drawAll(state) {
+    const ctx = render.ctx;
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    render.drawBackground(state);
+
+    // --- сетка поля: живёт в мировых координатах и поворачивается вместе с полем.
+    // Обрезка по игровой области не даёт наезжать на HUD и руку.
+    const area = CONFIG.ui.boardArea;
+    const clipBoard = () => {
+      ctx.beginPath();
+      ctx.rect(0, area.top, CONFIG.canvas.width, area.bottom - area.top);
+      ctx.clip();
+    };
+    ctx.save();
+    clipBoard();
+    render.applyWorldTransform(state);
+    render.drawBoard(state);
+    render.drawBoostTargets(state);
+    ctx.restore();
+
+    // --- стопки и эффекты: экранные координаты, поэтому слои всегда растут вверх
+    // экрана, а не вбок при повороте поля
+    ctx.save();
+    clipBoard();
+    render.drawStacks(state);
+    render.drawFlows(state);
+    render.drawBurns(state);
+    ctx.restore();
+
+    // Перетаскиваемая стопка — без обрезки: её ведут от руки, которая лежит ниже
+    // игровой области
+    render.drawDrag(state);
+
+    // --- экран: интерфейс не зависит от камеры ---
+    render.drawHand(state);
+    render.drawHUD(state);
+    render.drawBoostBar(state);
+    render.drawThemeButton(state);
+    render.drawResetCameraButton(state);
+    if (state.isGameOver) render.drawGameOver(state);
+    render.drawLeaderboard(state);
+  }
+};
+
+// ============================================================================
+// input — Pointer Events: взять / тащить / положить / отменить (Phase 2)
+// ============================================================================
+const input = {
+  // Координаты события → координаты канваса (канвас растянут CSS, поэтому масштабируем)
+  toCanvasCoords(canvas, event) {
+    const rect = canvas.getBoundingClientRect();
+    return {
+      x: (event.clientX - rect.left) * (CONFIG.canvas.width / rect.width),
+      y: (event.clientY - rect.top) * (CONFIG.canvas.height / rect.height)
+    };
+  },
+
+  // Какой слот руки под точкой. Зона слота — прямоугольник вокруг гекса,
+  // расширенный вверх на высоту псевдо-3D слоёв, чтобы попадать по всей стопке.
+  hitHandSlot(state, x, y) {
+    const size = CONFIG.ui.handHexSize;
+    for (let i = 0; i < 3; i++) {
+      const stack = state.hand.slots[i];
+      if (!stack) continue;
+      const c = render.handSlotCenter(i);
+      const layers = Math.min(stack.tiles.length, CONFIG.tile.maxVisibleLayers);
+      const top = c.y - size - (layers - 1) * CONFIG.tile.layerOffset;
+      if (x >= c.x - size && x <= c.x + size && y >= top && y <= c.y + size) return i;
+    }
+    return -1;
+  },
+
+  // Экран → мир и обратно: мир повёрнут вокруг центра поля, поэтому точку ввода
+  // нужно повернуть в обратную сторону. Интерфейс (рука, HUD, кнопки) — в экранных.
+  rotatePoint(x, y, angle) {
+    const L = hexMath.layout;
+    const dx = x - L.centerX;
+    const dy = y - L.centerY;
+    const cos = Math.cos(angle);
+    const sin = Math.sin(angle);
+    return { x: L.centerX + dx * cos - dy * sin, y: L.centerY + dx * sin + dy * cos };
+  },
+  screenToWorld(state, x, y) {
+    return input.rotatePoint(x, y, -state.camera.rotation);
+  },
+  worldToScreen(state, x, y) {
+    return input.rotatePoint(x, y, state.camera.rotation);
+  },
+
+  // Угол от центра поля до точки — основа жеста вращения
+  angleFromCenter(x, y) {
+    const L = hexMath.layout;
+    return Math.atan2(y - L.centerY, x - L.centerX);
+  },
+
+  // Свободная ячейка под якорем перетаскиваемой стопки (координаты мировые)
+  freeCellAt(state, x, y) {
+    const a = hexMath.pixelToAxial(x, y);
+    const cell = state.cells.get(hexMath.key(a.q, a.r));
+    return cell && !cell.stack ? cell : null;
+  },
+
+
+  // Попадание точки в прямоугольник кнопки
+  hitRect(rect, x, y) {
+    return x >= rect.x && x <= rect.x + rect.w && y >= rect.y && y <= rect.y + rect.h;
+  },
+
+  // Текущий жест вращения поля
+  spin: null,
+
+  // --- Бусты ---------------------------------------------------------------
+
+  boostConfig(kind) {
+    return CONFIG.boosts.find(b => b.kind === kind);
+  },
+
+  // Включить или выключить буст. Монеты списываются не здесь, а при применении.
+  toggleBoost(state, kind) {
+    if (state.boost && state.boost.kind === kind) {
+      state.boost = null;
+      return;
+    }
+    if (state.isAnimating || state.isGameOver) return;
+    if (state.coins < input.boostConfig(kind).cost) return;
+    state.boost = { kind, from: null };
+    // выбор ячейки несовместим с перетаскиванием стопки из руки
+    if (state.drag) {
+      state.hand.slots[state.drag.srcSlot] = state.drag.stack;
+      state.drag = null;
+      state.hoverKey = null;
+    }
+  },
+
+  // Годится ли ячейка для текущего шага активного буста
+  isBoostTarget(state, cell) {
+    const boost = state.boost;
+    if (!boost) return false;
+    if (boost.kind === 'remove') return !!cell.stack;
+    if (boost.kind === 'swap') return !!cell.stack && cell !== boost.from;
+    // move: сначала занятая ячейка-источник, потом свободная ячейка-цель
+    return boost.from ? !cell.stack : !!cell.stack;
+  },
+
+  // Клик по ячейке в режиме буста
+  applyBoostTo(state, cell) {
+    const boost = state.boost;
+    if (!input.isBoostTarget(state, cell)) return;
+    const config = input.boostConfig(boost.kind);
+
+    if (boost.kind === 'remove') {
+      cell.stack = null;
+      input.finishBoost(state, config.cost, [cell]);
+      return;
+    }
+    if (!boost.from) {                 // первый выбор для move и swap
+      boost.from = cell;
+      requestRender();
+      return;
+    }
+    if (boost.kind === 'move') {
+      cell.stack = boost.from.stack;
+      cell.stack.cell = { q: cell.q, r: cell.r };
+      boost.from.stack = null;
+      input.finishBoost(state, config.cost, [cell]);
+      return;
+    }
+    // swap: меняем содержимое двух занятых ячеек
+    const fromStack = boost.from.stack;
+    boost.from.stack = cell.stack;
+    boost.from.stack.cell = { q: boost.from.q, r: boost.from.r };
+    cell.stack = fromStack;
+    cell.stack.cell = { q: cell.q, r: cell.r };
+    input.finishBoost(state, config.cost, [cell, boost.from]);
+  },
+
+  // Списать монеты и разрешить возможные слияния от затронутых ячеек
+  finishBoost(state, cost, changedCells) {
+    state.boost = null;
+    spendCoins(state, cost);
+    const starts = changedCells.filter(c => c.stack);
+    if (starts.length) {
+      state.isAnimating = true;
+      runWave(state, starts);
+    } else {
+      checkGameOver(state);
+      requestRender();
+    }
+  },
+
+  attach(canvas, state) {
+    // Нажатие: кнопки → рука → вращение поля (в этом порядке приоритета)
+    canvas.addEventListener('pointerdown', (event) => {
+      const point = input.toCanvasCoords(canvas, event);
+
+      // экран рейтинга поверх всего: реагирует только кнопка «Назад»
+      if (state.leaderboard && state.leaderboard.open) {
+        if (input.hitRect(render.restartButtonRect(), point.x, point.y)) {
+          state.leaderboard.open = false;
+          requestRender();
+        }
+        return;
+      }
+      if (state.isGameOver) {
+        if (input.hitRect(render.leaderboardButtonRect(), point.x, point.y)) {
+          openLeaderboard(state);
+          return;
+        }
+        if (input.hitRect(render.restartButtonRect(), point.x, point.y)) restart();
+        return;
+      }
+      if (input.hitRect(render.resetCameraButtonRect(), point.x, point.y)) {
+        resetCamera(state);
+        requestRender();
+        return;
+      }
+      if (input.hitRect(render.themeButtonRect(), point.x, point.y)) {
+        toggleTheme();
+        return;
+      }
+
+      // панель бустов
+      const boostIndex = CONFIG.boosts.findIndex((boost, i) =>
+        input.hitRect(render.boostButtonRect(i), point.x, point.y));
+      if (boostIndex !== -1) {
+        input.toggleBoost(state, CONFIG.boosts[boostIndex].kind);
+        requestRender();
+        return;
+      }
+
+      // активный буст: клик по полю выбирает ячейку, а не вращает и не ставит стопку
+      if (state.boost) {
+        const world = input.screenToWorld(state, point.x, point.y);
+        const axial = hexMath.pixelToAxial(world.x, world.y);
+        const target = state.cells.get(hexMath.key(axial.q, axial.r));
+        if (target) input.applyBoostTo(state, target);
+        return;
+      }
+
+      const slot = state.isAnimating || state.drag ? -1 : input.hitHandSlot(state, point.x, point.y);
+      if (slot !== -1) {
+        const stack = state.hand.slots[slot];
+        const world = input.screenToWorld(state, point.x, point.y);
+        state.hand.slots[slot] = null;
+        state.drag = {
+          stack, srcSlot: slot, pointerId: event.pointerId,
+          x: world.x, y: world.y - CONFIG.ui.dragLift
+        };
+        state.hoverKey = null;
+        // захват указателя: события идут сюда, даже если палец ушёл за канвас
+        if (canvas.setPointerCapture) canvas.setPointerCapture(event.pointerId);
+        requestRender();
+        return;
+      }
+
+      // мимо руки и кнопок — начинаем вращать поле
+      input.spin = {
+        pointerId: event.pointerId,
+        startAngle: input.angleFromCenter(point.x, point.y),
+        startRotation: state.camera.rotation,
+        startX: point.x, startY: point.y,
+        moved: false
+      };
+    });
+
+    // Движение: перетаскивание стопки либо вращение поля
+    canvas.addEventListener('pointermove', (event) => {
+      const point = input.toCanvasCoords(canvas, event);
+
+      const d = state.drag;
+      if (d && d.pointerId === event.pointerId) {
+        const world = input.screenToWorld(state, point.x, point.y);
+        d.x = world.x;
+        d.y = world.y - CONFIG.ui.dragLift;
+        const cell = input.freeCellAt(state, d.x, d.y);
+        state.hoverKey = cell ? hexMath.key(cell.q, cell.r) : null;
+        requestRender();
+        return;
+      }
+
+      const spin = input.spin;
+      if (spin && spin.pointerId === event.pointerId) {
+        // мелкие дрожания курсора не должны крутить поле
+        if (!spin.moved &&
+            Math.hypot(point.x - spin.startX, point.y - spin.startY) < CONFIG.camera.minDragToRotate) {
+          return;
+        }
+        spin.moved = true;
+        const delta = input.angleFromCenter(point.x, point.y) - spin.startAngle;
+        state.camera.rotation = spin.startRotation + delta;
+        requestRender();
+      }
+    });
+
+    // Отпускание: положить стопку либо довернуть поле до ближайшей грани
+    canvas.addEventListener('pointerup', (event) => {
+      const d = state.drag;
+      if (d && d.pointerId === event.pointerId) {
+        const cell = input.freeCellAt(state, d.x, d.y);
+        if (cell) {
+          input.placeStack(state, d.stack, cell);
+        } else {
+          state.hand.slots[d.srcSlot] = d.stack;   // отмена: занятая ячейка или вне поля
+        }
+        state.drag = null;
+        state.hoverKey = null;
+        requestRender();
+        return;
+      }
+      // вращение ходом не считается — стопка не ставится
+      if (input.spin && input.spin.pointerId === event.pointerId) {
+        const spun = input.spin.moved;
+        input.spin = null;
+        if (spun) snapRotation(state);
+      }
+    });
+
+    // Прерванный ввод (системный жест, уход фокуса) — считаем отменой
+    canvas.addEventListener('pointercancel', (event) => {
+      if (input.spin && input.spin.pointerId === event.pointerId) {
+        input.spin = null;
+        snapRotation(state);
+      }
+      const d = state.drag;
+      if (!d || d.pointerId !== event.pointerId) return;
+      state.hand.slots[d.srcSlot] = d.stack;
+      state.drag = null;
+      state.hoverKey = null;
+      requestRender();
+    });
+
+    // Клавиатура: R — заново, Esc — отменить активный буст
+    window.addEventListener('keydown', (event) => {
+      if (event.code === 'Escape' && state.boost) {
+        state.boost = null;
+        requestRender();
+        return;
+      }
+      if (event.code === 'KeyT') {
+        toggleTheme();
+        return;
+      }
+      if (event.code === 'KeyR' && !state.isAnimating) restart();
+    });
+  },
+
+  // Установка стопки в ячейку → сразу разрешение цепочки.
+  // Рука пополняется по завершении волны (см. finishWave), чтобы милосердный
+  // генератор видел ячейки, освободившиеся после сгораний.
+  placeStack(state, stack, cell) {
+    stack.cell = { q: cell.q, r: cell.r };
+    cell.stack = stack;
+    state.showHint = false;                       // подсказка гаснет после первого хода
+    // «приземление» стопки, затем разрешение цепочки; ввод заблокирован уже сейчас
+    state.isAnimating = true;
+    state.landing = { cell, t: 0 };
+    animate(state, CONFIG.animation.landingMs,
+      (t) => { state.landing.t = t; },
+      () => {
+        state.landing = null;
+        // волна собирается в соседнюю стопку того же цвета, если она есть
+        runWave(state, mergeEngine.mergeTargetFor(state, cell));
+      });
+  }
+};
+
+// ============================================================================
+// main — GameState, отрисовка по событию, restart
+// ============================================================================
+const GameState = {
+  cells: null,
+  hand: { slots: [null, null, null] },
+  score: 0,
+  best: 0,
+  coins: 0,            // кошелёк: копится между партиями, тратится на бусты (Phase 10)
+  activeColors: CONFIG.board.radiusSteps[0].colors,
+  isAnimating: false,
+  isGameOver: false,
+  showHint: true,
+  drag: null,          // текущее перетаскивание: {stack, srcSlot, pointerId, x, y}
+  boost: null,         // активный буст: {kind, from}
+  leaderboard: null,   // экран рейтинга: {open, loading, available, entries, playerRank}
+  hoverKey: null,      // ключ подсвеченной свободной ячейки под стопкой
+  radius: CONFIG.board.radiusSteps[0].radius,   // текущий радиус поля
+  camera: { rotation: 0 },                      // угол поворота поля, радианы
+  anim: null,          // анимация перелива: {flows, t} — живёт только внутри волны
+  burnAnim: null,      // вспышка сгорания: {burns, t}
+  landing: null,       // «приземление» поставленной стопки: {cell, t}
+  newRing: null        // появление нового кольца: {keys, t}
+};
+
+let renderQueued = false;
+
+// Отрисовка по событию: в простое канвас не перерисовывается
+function requestRender() {
+  if (renderQueued) return;
+  renderQueued = true;
+  requestAnimationFrame(() => {
+    renderQueued = false;
+    render.drawAll(GameState);
+  });
+}
+
+// --- Разрешение цепочки с анимацией ---------------------------------------
+// Ввод заблокирован флагом isAnimating; RAF работает только пока летят фишки.
+
+// Принимает ячейку или массив ячеек (буст «обмен» меняет сразу две)
+function runWave(state, start) {
+  state.isAnimating = true;
+  waveStep(state, mergeEngine.createWave(start));
+}
+
+// Один шаг волны: план (со снятием фишек) → анимация полёта → фиксация
+function waveStep(state, ctx) {
+  if (!ctx.queue.length || ctx.iterations >= CONFIG.merge.maxWaveIterations) {
+    finishWave(state);
+    return;
+  }
+  ctx.iterations++;
+  const plan = mergeEngine.planWave(state, ctx);
+  if (plan.flows.length) {
+    animateFlows(state, plan, () => waveCommit(state, plan, ctx));
+  } else {
+    waveCommit(state, plan, ctx);
+  }
+}
+
+function waveCommit(state, plan, ctx) {
+  const res = mergeEngine.commitWave(state, plan, ctx);
+  state.score += res.burnPoints;
+  if (res.burnCoins) addCoins(state, res.burnCoins);
+  updateBest(state);
+  updateActiveColors(state);
+  render.drawAll(state);
+  // вспышка на сгоревших ячейках; она же пауза, иначе цепочка мелькает
+  if (res.burns.length) {
+    state.burnAnim = { burns: res.burns, t: 0 };
+    animate(state, CONFIG.animation.burnFlashMs,
+      (t) => { state.burnAnim.t = t; },
+      () => { state.burnAnim = null; waveStep(state, ctx); });
+  } else {
+    waveStep(state, ctx);
+  }
+}
+
+function animateFlows(state, plan, done) {
+  state.anim = { flows: plan.flows, t: 0 };
+  animate(state, CONFIG.animation.waveStepMs,
+    (t) => { state.anim.t = t; },
+    () => { state.anim = null; done(); });
+}
+
+// Общий цикл анимации: RAF работает только пока идёт эффект
+function animate(state, durationMs, onProgress, done) {
+  const start = performance.now();
+  const tick = (now) => {
+    const t = Math.min(1, (now - start) / durationMs);
+    onProgress(t);
+    render.drawAll(state);
+    if (t < 1) requestAnimationFrame(tick);
+    else done();
+  };
+  requestAnimationFrame(tick);
+}
+
+function finishWave(state) {
+  state.anim = null;
+  state.burnAnim = null;
+  state.landing = null;
+  // поле растёт до проверки проигрыша: иначе партия закончилась бы за миг до того,
+  // как счёт открыл новое кольцо
+  const grew = growBoardIfNeeded(state);
+  // рука опустела полностью → новая раздача (уже с учётом освободившихся ячеек)
+  if (state.hand.slots.every(s => s === null)) generators.dealHand(state);
+  updateBest(state);
+  checkGameOver(state);
+
+  if (grew) {
+    // новое кольцо проявляется, ввод до конца анимации заблокирован
+    animate(state, CONFIG.animation.ringGrowMs,
+      (t) => { state.newRing.t = t; },
+      () => { state.newRing = null; state.isAnimating = false; requestRender(); });
+  } else {
+    state.isAnimating = false;
+    requestRender();
+  }
+}
+
+// --- Камера ----------------------------------------------------------------
+
+// Вернуть поле в исходную ориентацию
+function resetCamera(state) {
+  state.camera.rotation = 0;
+}
+
+// --- Визуальный стиль (Phase 12) -------------------------------------------
+// Тема вливает свои цвета в CONFIG.ui и палитру, поэтому остальной render
+// не знает, какой стиль включён.
+function applyTheme(name) {
+  if (!THEMES[name]) return false;
+  THEME = THEMES[name];
+  Object.assign(CONFIG.ui, THEME.ui);
+  Object.assign(CONFIG.ui.boostBar, THEME.boostBar);
+  Object.assign(CONFIG.tile, THEME.geometry);
+  CONFIG.colors.palette = THEME.palette;
+  render.backgroundCache = null;             // фон перерисуется в новом стиле
+  Platform.saveTheme(name);
+  return true;
+}
+
+// Переключение стилей — на время выбора (Phase 12): кнопка «Стиль» и клавиша T
+function toggleTheme() {
+  const names = Object.keys(THEMES);
+  const current = names.findIndex(name => THEMES[name] === THEME);
+  applyTheme(names[(current + 1) % names.length]);
+  requestRender();
+}
+
+// Ближайший угол, кратный шагу примагничивания (60° — симметрия гекса,
+// при таком повороте сетка совпадает сама с собой)
+function nearestSnapAngle(rotation) {
+  const step = CONFIG.camera.snapStepDeg * Math.PI / 180;
+  return Math.round(rotation / step) * step;
+}
+
+// Доворот поля до ближайшей грани после жеста вращения
+function snapRotation(state) {
+  const from = state.camera.rotation;
+  const to = nearestSnapAngle(from);
+  if (Math.abs(to - from) < 1e-6) {
+    state.camera.rotation = to;
+    requestRender();
+    return;
+  }
+  animate(state, CONFIG.animation.snapMs || CONFIG.camera.snapMs,
+    (t) => { state.camera.rotation = from + (to - from) * (t * t * (3 - 2 * t)); },
+    () => { state.camera.rotation = to; requestRender(); });
+}
+
+// Радиус поля, положенный текущему счёту
+function radiusForScore(score) {
+  let radius = CONFIG.board.radiusSteps[0].radius;
+  CONFIG.board.radiusSteps.forEach(step => {
+    if (score >= step.fromScore) radius = step.radius;
+  });
+  return radius;
+}
+
+// Дорастить поле, если счёт открыл новое кольцо. Возвращает true, если выросло.
+function growBoardIfNeeded(state) {
+  const target = radiusForScore(state.score);
+  if (target <= state.radius) return false;
+
+  const before = new Set(state.cells.keys());
+  state.radius = target;
+  hexMath.fitLayout(target);
+  hexMath.expandCells(state.cells, target);
+  resetCamera(state);        // иначе новое кольцо окажется за кадром
+  // ключи новых ячеек — для анимации появления
+  const fresh = [];
+  state.cells.forEach((cell, key) => { if (!before.has(key)) fresh.push(key); });
+  state.newRing = { keys: new Set(fresh), t: 0 };
+  return true;
+}
+
+// Кривая сложности: набор цветов расширяется вместе с полем — каждое новое кольцо
+// приносит +3 цвета (4 -> 7 -> 10). Больше цветов — реже случайные совпадения.
+function updateActiveColors(state) {
+  let colors = CONFIG.board.radiusSteps[0].colors;
+  CONFIG.board.radiusSteps.forEach(step => {
+    if (state.score >= step.fromScore) colors = step.colors;
+  });
+  state.activeColors = Math.min(colors, CONFIG.colors.palette.length);
+}
+
+// Рекорд — переживает сессию. Пишем сразу через Platform.
+function updateBest(state) {
+  if (state.score <= state.best) return;
+  state.best = state.score;
+  Platform.saveBest(state.best);
+}
+
+// Кошелёк тоже переживает сессию: монеты копятся между партиями (ADR-0004)
+function addCoins(state, amount) {
+  state.coins += amount;
+  Platform.saveCoins(state.coins);
+}
+
+// Плата за буст — тем же путём, что и начисление
+function spendCoins(state, amount) {
+  state.coins = Math.max(0, state.coins - amount);
+  Platform.saveCoins(state.coins);
+}
+
+// Проигрыш: на поле нет свободных ячеек, а в руке ещё есть стопки
+function checkGameOver(state) {
+  if (generators.freeCells(state).length > 0) return;
+  if (state.hand.slots.every(s => s === null)) return;
+  state.isGameOver = true;
+  Platform.submitScore(state.score);      // на платформе уйдёт в глобальный рейтинг
+}
+
+// Экран рейтинга: данные тянутся при открытии, ошибки не ломают игру (ADR-0005)
+function openLeaderboard(state) {
+  state.leaderboard = { open: true, loading: true, available: false, entries: [], playerRank: 0 };
+  requestRender();
+  Platform.fetchLeaderboard().then(result => {
+    state.leaderboard = Object.assign({ open: true, loading: false }, result);
+    requestRender();
+  });
+}
+
+function restart() {
+  GameState.radius = radiusForScore(0);
+  hexMath.fitLayout(GameState.radius);
+  GameState.cells = hexMath.generateCells(GameState.radius);
+  GameState.score = 0;
+  GameState.best = Platform.loadBest();
+  GameState.coins = Platform.loadCoins();   // кошелёк не сбрасывается новой партией
+  GameState.activeColors = CONFIG.board.radiusSteps[0].colors;
+  GameState.isAnimating = false;
+  GameState.isGameOver = false;
+  GameState.showHint = true;
+  GameState.drag = null;
+  GameState.boost = null;
+  GameState.leaderboard = null;
+  GameState.hoverKey = null;
+  resetCamera(GameState);
+  input.spin = null;
+  GameState.anim = null;
+  GameState.burnAnim = null;
+  GameState.landing = null;
+  GameState.newRing = null;
+  generators.fillStartBoard(GameState);
+  generators.dealHand(GameState);
+  requestRender();
+}
+
+// --- QA-хуки (ADR-0002) ----------------------------------------------------
+// Только чтение состояния и фиксация seed; на геймплей не влияют.
+// Seed можно задать в адресной строке: index.html?seed=42
+
+// Текстовый снимок партии — для автотестов и отладки без скриншотов
+function renderGameToText() {
+  const lines = [];
+  lines.push('score=' + GameState.score + ' best=' + GameState.best +
+    ' colors=' + GameState.activeColors +
+    ' free=' + generators.freeCells(GameState).length +
+    (GameState.isGameOver ? ' GAMEOVER' : '') +
+    (GameState.isAnimating ? ' ANIMATING' : ''));
+  Array.from(GameState.cells.keys()).sort().forEach(key => {
+    const stack = GameState.cells.get(key).stack;
+    lines.push(key + ': ' + (stack ? stack.tiles.join('') : '-'));
+  });
+  lines.push('hand: ' + GameState.hand.slots
+    .map(s => (s ? s.tiles.join('') : '-')).join(' | '));
+  return lines.join('\n');
+}
+
+function applySeedFromUrl() {
+  const match = /[?&]seed=(-?\d+)/.exec(location.search);
+  if (match) generators.rng.seed(parseInt(match[1], 10));
+}
+
+function exposeQaHooks() {
+  window.__GAME_STATE__ = GameState;
+  window.render_game_to_text = renderGameToText;
+  window.__SET_SEED__ = (value) => { generators.rng.seed(value); restart(); };
+}
+
+function init() {
+  const canvas = document.getElementById('game');
+  render.ctx = canvas.getContext('2d');
+  Platform.migrateEconomy();
+  Platform.initPlatform();          // SDK грузится только на домене платформы
+  // стиль: из адресной строки (?theme=anime), иначе сохранённый, иначе первый
+  const urlTheme = /[?&]theme=(\w+)/.exec(location.search);
+  applyTheme((urlTheme && urlTheme[1]) || Platform.loadTheme() || Object.keys(THEMES)[0]);
+  applySeedFromUrl();
+  restart();
+  input.attach(canvas, GameState);
+  exposeQaHooks();
+}
+
+init();
+</script>
+</body>
+</html>

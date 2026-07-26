@@ -1,0 +1,14 @@
+# Dev-QA (появится только на Phase X, в поставку не входит — ADR-0002)
+node_modules/
+test-results/
+playwright-report/
+blob-report/
+.playwright/
+
+# Локальные настройки инструментов
+.claude/settings.local.json
+
+# ОС
+Thumbs.db
+desktop.ini
+.DS_Store
