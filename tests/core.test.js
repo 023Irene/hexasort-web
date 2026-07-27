@@ -55,14 +55,14 @@ const locationStub = { search: '', host: 'localhost' };
 
 js += '\nmodule.exports = { CONFIG, Platform, hexMath, generators, mergeEngine, GameState, render,' +
   ' input, restart, updateActiveColors, renderGameToText, radiusForScore, growBoardIfNeeded,' +
-  ' resetCamera, nearestSnapAngle, snapRotation, THEMES, applyTheme, toggleTheme };';
+  ' resetCamera, nearestSnapAngle, snapRotation, THEMES, applyTheme };';
 const mod = { exports: {} };
 new Function('module', 'localStorage', 'requestAnimationFrame', 'document', 'performance',
   'setTimeout', 'window', 'location', js)
   (mod, localStorageStub, raf, documentStub, perf, timeout, windowStub, locationStub);
 const { CONFIG, Platform, hexMath, generators, mergeEngine, GameState, render, input, restart,
   updateActiveColors, renderGameToText, radiusForScore, growBoardIfNeeded,
-  resetCamera, nearestSnapAngle, snapRotation, THEMES, applyTheme, toggleTheme } = mod.exports;
+  resetCamera, nearestSnapAngle, snapRotation, THEMES, applyTheme } = mod.exports;
 
 let ok = true;
 const check = (name, cond, extra = '') => {
@@ -261,9 +261,14 @@ res = mergeEngine.resolveWave(GameState, cell('0,0'));
 check('цепочка прошла две волны', res.waves === 2, 'waves=' + res.waves);
 check('оба сгорания случились, поле пусто', dump().split('|').every(s => s.endsWith(':-')), dump());
 check('очки цепочки: два блока по 10 = 20', res.totalPoints === 20, 'got ' + res.totalPoints);
-check('множителя цепочки нет: вторая волна даёт те же 10',
+check('множителя очков нет: вторая волна даёт те же 10',
   res.steps[1].points === 10, JSON.stringify(res.steps));
-check('монет за цепочку: 10 + 10 = 20', res.totalCoins === 20, 'got ' + res.totalCoins);
+// Комбо (Phase 16) платит монетами, а не очками: первое звено без бонуса,
+// второе даёт comboCoinBonus сверх 10 своих монет.
+check('комбо считается по звеньям со сгоранием',
+  res.steps[0].combo === 1 && res.steps[1].combo === 2, JSON.stringify(res.steps));
+check('монет за цепочку: 10 + 10 + бонус за комбо ×2',
+  res.totalCoins === 20 + CONFIG.scoring.comboCoinBonus, 'got ' + res.totalCoins);
 
 // 8. детерминизм: одинаковая доска + ход = одинаковый результат
 const spec = {
@@ -558,11 +563,156 @@ check('подсказка видна на старте', GameState.showHint === 
 input.placeStack(GameState, { tiles: [0], cell: null }, anyFreeCell());
 check('подсказка гаснет после первого хода', GameState.showHint === false);
 
-console.log('\n--- Phase 12: визуальные стили ---');
+console.log('\n--- Phase 16: анимации бустов и комбо ---');
 
-// 1. обе темы объявлены и полны
+// 1. анимация бустов: стопка летит, а не телепортируется
+restart();
+GameState.coins = 500;
+const boostSrc = cell('1,-1');
+const boostDst = cell('2,-2');
+boostSrc.stack = { tiles: rep(0, 3), cell: { q: 1, r: -1 } };
+boostDst.stack = null;
+input.toggleBoost(GameState, 'move');
+input.applyBoostTo(GameState, boostSrc);          // выбрали источник
+check('первый клик буста «перенос» только запоминает ячейку',
+  GameState.boost && GameState.boost.from === boostSrc);
+input.applyBoostTo(GameState, boostDst);          // выбрали цель
+check('после переноса стопка на новом месте',
+  boostDst.stack !== null && boostSrc.stack === null);
+check('монеты за буст списаны',
+  GameState.coins === 500 - input.boostConfig('move').cost, 'coins=' + GameState.coins);
+
+// кадр в середине перелёта: ячейка-цель спрятана, стопку рисует drawBoostAnim
+GameState.boostAnim = input.boostFlight([
+  { tiles: rep(0, 3), from: boostSrc, to: boostDst, side: 1 }
+]);
+GameState.boostAnim.t = 0.5;
+check('во время перелёта ячейка-цель спрятана',
+  GameState.boostAnim.hide.has(hexMath.key(boostDst.q, boostDst.r)));
+render.drawAll(GameState);
+check('кадр в середине перелёта буста рисуется без ошибок', true);
+GameState.boostAnim = null;
+
+// 2. «убрать» рассыпает стопку осколками, а не гасит её молча
+restart();
+GameState.coins = 500;
+GameState.fx = { particles: [], floats: [], shake: null };
+const removeCell = cell('1,-1');
+removeCell.stack = { tiles: rep(0, 4), cell: { q: 1, r: -1 } };
+input.toggleBoost(GameState, 'remove');
+// считаем осколки на лету: цикл эффектов синхронный и успевает их погасить,
+// поэтому длину массива после вызова смотреть бесполезно
+let scattered = 0;
+const spyParticles = [];
+spyParticles.push = function (item) {
+  scattered++;
+  return Array.prototype.push.call(this, item);
+};
+GameState.fx.particles = spyParticles;
+input.applyBoostTo(GameState, removeCell);
+check('буст «убрать» очистил ячейку', removeCell.stack === null);
+check('буст «убрать» рассыпал стопку на осколки',
+  scattered === 4 * CONFIG.animation.boostScatterPerTile, 'осколков ' + scattered);
+GameState.fx = { particles: [], floats: [], shake: null };
+
+// 3. комбо: цепочка из двух сгораний платит бонусом, из одного — нет
+restart();
+setBoardForBurn();
+GameState.coins = 0;
+playBurnMove();
+check('одиночное сгорание бонуса за комбо не даёт',
+  GameState.coins === 10, 'coins=' + GameState.coins);
+restart();
+
+console.log('\n--- Phase 15: анимации и juice ---');
+
+// 1. кривые сглаживания
+check('ease.smooth закреплён на краях',
+  render.ease.smooth(0) === 0 && render.ease.smooth(1) === 1);
+check('ease.outCubic тормозит к концу',
+  render.ease.outCubic(0) === 0 && Math.abs(render.ease.outCubic(1) - 1) < 1e-9 &&
+  render.ease.outCubic(0.5) > 0.5);
+check('ease.outBack перелетает единицу и возвращается',
+  Math.abs(render.ease.outBack(1) - 1) < 1e-9 && render.ease.outBack(0.78) > 1);
+
+// 2. скорость доворота поля переехала в animation — раньше ключа не было вовсе
+// и код молча падал на фолбэк CONFIG.camera.snapMs
+check('CONFIG.animation.snapMs задан', CONFIG.animation.snapMs > 0);
+check('CONFIG.camera.snapMs больше не нужен', CONFIG.camera.snapMs === undefined);
+
+// 3. цикл эффектов завершается сам и догоняет счётчики.
+// Это главный инвариант: живой эффект держит RAF, и незавершённый цикл
+// крутил бы кадры вечно (в тестах — ушёл бы в бесконечную рекурсию).
+restart();
+setBoardForBurn();
+GameState.score = 0;
+GameState.coins = 0;
+playBurnMove();
+check('после сгорания счёт на экране догнал настоящий',
+  GameState.scoreShown === GameState.score && GameState.score === 10,
+  'shown=' + GameState.scoreShown + ' score=' + GameState.score);
+check('кошелёк на экране догнал настоящий',
+  GameState.coinsShown === GameState.coins, 'shown=' + GameState.coinsShown);
+check('эффекты погасли и больше не держат кадр',
+  GameState.fx.particles.length === 0 && GameState.fx.floats.length === 0 &&
+  GameState.fx.shake === null);
+
+// 4. кадр с живыми эффектами рисуется без ошибок
+const fxCell = cell('0,0');
+GameState.fx.particles.push({ cell: fxCell, color: 0, age: 0, vx: 40, vy: -60 });
+GameState.fx.floats.push({ cell: fxCell, text: '+16', age: 0 });
+GameState.fx.shake = { age: 0 };
+render.drawAll(GameState);
+check('кадр с осколками, «+N» и тряской рисуется без ошибок', true);
+
+// 5. тряска затухает и без эффекта не смещает поле
+const shakeStart = Math.abs(render.shakeOffset(GameState).x);
+GameState.fx.shake = { age: CONFIG.animation.shakeMs };
+check('тряска затухает к концу',
+  Math.abs(render.shakeOffset(GameState).x) <= shakeStart);
+GameState.fx = { particles: [], floats: [], shake: null };
+check('без тряски смещение нулевое',
+  render.shakeOffset(GameState).x === 0 && render.shakeOffset(GameState).y === 0);
+
+// 6. слияние стопок: летящая фишка целится в свой будущий слой, а не в центр
+// ячейки — иначе стопка в конце полёта «дёргается» вверх скачком
+const layerStep = CONFIG.tile.layerOffset;
+check('layerRise: нижний слой лежит в центре ячейки', render.layerRise(4, 0) === 0);
+check('layerRise: слои идут вверх с шагом layerOffset',
+  render.layerRise(4, 3) === layerStep * 3, render.layerRise(4, 3));
+check('layerRise: полная стопка ужимается ровно в maxRise',
+  Math.abs(render.layerRise(CONFIG.tile.maxVisibleLayers,
+    CONFIG.tile.maxVisibleLayers - 1) - CONFIG.tile.maxRise) < 1e-9);
+check('layerRise: слои ниже видимой части прижаты к центру',
+  render.layerRise(40, 0) === 0 && render.layerRise(40, 5) === 0);
+
+restart();
+const flowSrc = cell('1,-1');
+const flowDst = cell('0,0');
+flowDst.stack = { tiles: rep(0, 3), cell: { q: 0, r: 0 } };
+flowSrc.stack = { tiles: rep(0, 1), cell: { q: 1, r: -1 } };
+GameState.anim = {
+  flows: [{ from: flowSrc, to: flowDst, color: 0, count: 2, baseLayer: 3, finalTotal: 5 }],
+  t: 0.5
+};
+render.drawAll(GameState);
+check('кадр в середине слияния рисуется без ошибок', true);
+GameState.anim = null;
+
+// 7. новая партия не заставляет счётчики доезжать до нуля
+GameState.scoreShown = 999;
+restart();
+check('restart ставит счётчики сразу, без доезда',
+  GameState.scoreShown === GameState.score && GameState.coinsShown === GameState.coins);
+check('restart гасит эффекты и прячет проявление оверлея',
+  GameState.fx.particles.length === 0 && GameState.overlayT === 1);
+
+console.log('\n--- Phase 12: визуальный стиль ---');
+
+// 1. тема объявлена и полна. Проверки идут по Object.keys, а не по имени ключа:
+// из восьми вариантов остался один, но структура рассчитана на несколько.
 const themeNames = Object.keys(THEMES);
-check('доступны обе темы', themeNames.length === 2 && THEMES.paper && THEMES.anime,
+check('выбранный стиль объявлен', themeNames.length >= 1 && THEMES.paper,
   themeNames.join(', '));
 themeNames.forEach(name => {
   const t = THEMES[name];
@@ -571,7 +721,8 @@ themeNames.forEach(name => {
     'цветов ' + t.palette.length);
   check(`«${t.name}»: заданы все цвета интерфейса`,
     ['bg', 'cellFill', 'cellStroke', 'text', 'textDim', 'highlightFill', 'highlightStroke',
-     'overlayBg', 'overlayText', 'buttonFill', 'buttonFillDark', 'coinColor']
+     'overlayBg', 'overlayText', 'cardFill', 'cardShadow',
+     'buttonFill', 'buttonFillDark', 'buttonText', 'coinColor']
       .every(key => typeof t.ui[key] === 'string' && t.ui[key].length > 0));
   check(`«${t.name}»: есть все три функции отрисовки`,
     typeof t.background === 'function' && typeof t.emptyCell === 'function' &&
@@ -581,41 +732,37 @@ themeNames.forEach(name => {
 });
 
 // 2. applyTheme вливает цвета темы в CONFIG
-applyTheme('anime');
-check('applyTheme перенёс палитру в CONFIG',
-  CONFIG.colors.palette === THEMES.anime.palette);
+const theme = THEMES[themeNames[0]];
+applyTheme(themeNames[0]);
+check('applyTheme перенёс палитру в CONFIG', CONFIG.colors.palette === theme.palette);
 check('applyTheme перенёс цвета интерфейса',
-  CONFIG.ui.bg === THEMES.anime.ui.bg && CONFIG.ui.text === THEMES.anime.ui.text);
+  CONFIG.ui.bg === theme.ui.bg && CONFIG.ui.text === theme.ui.text);
 check('applyTheme перенёс геометрию фишки',
-  CONFIG.tile.layerOffset === THEMES.anime.geometry.layerOffset,
+  CONFIG.tile.layerOffset === theme.geometry.layerOffset,
   'layerOffset=' + CONFIG.tile.layerOffset);
 check('applyTheme перенёс оформление панели бустов',
-  CONFIG.ui.boostBar.fill === THEMES.anime.boostBar.fill);
-check('тема сохранена через Platform', store[CONFIG.storage.themeKey] === 'anime');
+  CONFIG.ui.boostBar.fill === theme.boostBar.fill);
 check('неизвестная тема игнорируется', applyTheme('нет-такой') === false);
 
-// 3. переключение по кнопке и клавише
-applyTheme('paper');
-const themeBtn = render.themeButtonRect();
-fire('pointerdown', themeBtn.x + themeBtn.w / 2, themeBtn.y + themeBtn.h / 2);
-check('кнопка «Стиль» переключает тему', CONFIG.ui.bg === THEMES.anime.ui.bg);
-windowHandlers.keydown({ code: 'KeyT' });
-check('клавиша T возвращает первую тему', CONFIG.ui.bg === THEMES.paper.ui.bg);
-check('кнопка стиля не пересекается с панелью бустов',
-  themeBtn.y + themeBtn.h <= render.boostButtonRect(0).y);
+// 3. временного переключателя стилей в поставке нет
+check('кнопки «Стиль» больше нет', render.themeButtonRect === undefined);
+check('в хранилище не осталось ключа темы', CONFIG.storage.themeKey === undefined);
 
-// 4. Platform.loadTheme
-check('Platform.loadTheme читает сохранённое', Platform.loadTheme() === 'paper');
-store[CONFIG.storage.themeKey] = 'мусор';
-check('мусор в хранилище не ломает загрузку темы', Platform.loadTheme() === null);
+// 4. весь цвет живёт в CONFIG и теме: сменить стиль должно быть можно,
+// не трогая код отрисовки (критерий приёмки Phase 12)
+const themesSection = js.slice(js.indexOf('const THEMES = {'), js.indexOf('let THEME'));
+const configSection = js.slice(js.indexOf('const CONFIG = {'), js.indexOf('const THEMES = {'));
+const codeOnly = stripComments(js.replace(themesSection, '').replace(configSection, ''));
+const colorLiterals = codeOnly.match(/#[0-9A-Fa-f]{3,8}\b|rgba?\(\s*\d[\d.,\s]*\)/g) || [];
+check('цветов, захардкоженных вне CONFIG и темы, нет',
+  colorLiterals.length === 0, colorLiterals.join(' '));
 
 // 5. кэш фона сбрасывается при смене темы
 render.backgroundCache = 'старый';
-applyTheme('anime');
+applyTheme(themeNames[0]);
 check('смена темы сбрасывает кэш фона', render.backgroundCache === null);
-applyTheme('paper');
 
-// 6. игра работает в обеих темах: полный ход с отрисовкой
+// 6. игра работает в выбранном стиле: полный ход с отрисовкой
 themeNames.forEach(name => {
   applyTheme(name);
   setBoardForBurn();
@@ -628,7 +775,7 @@ themeNames.forEach(name => {
   render.drawAll(GameState);          // отрисовка не должна падать
   check(`в теме «${THEMES[name].name}» полный кадр рисуется без ошибок`, true);
 });
-applyTheme('paper');
+applyTheme(themeNames[0]);
 restart();
 
 console.log('\n--- Phase 11: бусты ---');
@@ -714,29 +861,37 @@ check('перенос собрал блок 11 и он сгорел (10 + 1*2 = 
   GameState.score === 12 && cell('0,0').stack === null,
   'score=' + GameState.score + ' ' + dump());
 
-// 7. «Обмен»: две стопки меняются местами и волна идёт от обеих
-setBoard({ '0,0': rep(1, 2), '2,0': rep(2, 3) });
+// 7. «Пересдача»: рука меняется целиком, ячейку выбирать не надо (Phase 17).
+// Заменила «Обмен», который решал ту же задачу, что и «Перенос», — переставить стопки.
+setBoard({ '0,0': rep(0, 3) });
 GameState.coins = 100;
-clickBoost('swap');
-clickCell(cell('0,0'));
-clickCell(cell('2,0'));
-check('обмен поменял стопки местами',
-  cell('0,0').stack.tiles.join('') === '222' && cell('2,0').stack.tiles.join('') === '11',
-  dump());
-check('цена обмена списана', GameState.coins === 100 - boostOf('swap').cost);
-check('stack.cell у обеих стопок обновлён',
-  cell('0,0').stack.cell.q === 0 && cell('2,0').stack.cell.q === 2);
+const handBefore = GameState.hand.slots.map(s => (s ? s.tiles.join('') : null));
+GameState.hand.slots[1] = null;                 // одна стопка уже израсходована
+clickBoost('reroll');
+check('пересдача не ждёт выбора ячейки', GameState.boost === null);
+check('все три слота заполнены заново',
+  GameState.hand.slots.every(s => s && s.tiles.length > 0),
+  GameState.hand.slots.map(s => (s ? s.tiles.join('') : '-')).join('|'));
+check('цена пересдачи списана', GameState.coins === 100 - boostOf('reroll').cost,
+  'coins=' + GameState.coins);
+check('пересдача не тронула поле', cell('0,0').stack.tiles.join('') === '000', dump());
+check('пересдача не начислила очков', GameState.score === 0);
+check('рука действительно обновилась',
+  GameState.hand.slots.map(s => s.tiles.join('')).join('|') !== handBefore.join('|') ||
+  handBefore[1] === null, 'до: ' + handBefore.join('|'));
 
-// 8. обмен запускает волну от обеих ячеек
-setBoard({ '0,0': rep(3, 1), '1,0': rep(0, 5), '1,-1': rep(0, 4), '2,-2': rep(0, 1) });
-GameState.coins = 100;
-GameState.score = 0;
-clickBoost('swap');
-clickCell(cell('0,0'));       // одиночная фишка цвета 3
-clickCell(cell('2,-2'));      // одиночная фишка цвета 0 рядом с большими стопками
-check('после обмена блок собрался и сгорел',
-  GameState.score === 10 && cell('1,0').stack === null,
-  'score=' + GameState.score + ' ' + dump());
+// 8. пересдача недоступна без монет и не ломает кадр анимацией
+setBoard({ '0,0': rep(0, 3) });
+GameState.coins = boostOf('reroll').cost - 1;
+const slotsPoor = GameState.hand.slots.map(s => (s ? s.tiles.join('') : null)).join('|');
+clickBoost('reroll');
+check('без монет пересдача не срабатывает',
+  GameState.hand.slots.map(s => (s ? s.tiles.join('') : null)).join('|') === slotsPoor &&
+  GameState.coins === boostOf('reroll').cost - 1);
+GameState.handAnim = { old: GameState.hand.slots.map(s => (s ? s.tiles.slice() : null)), t: 0.5 };
+render.drawAll(GameState);
+check('кадр в середине пересдачи рисуется без ошибок', true);
+GameState.handAnim = null;
 
 // 9. выбор недопустимой ячейки игнорируется
 setBoard({ '0,0': rep(0, 3) });
@@ -852,6 +1007,11 @@ const freeBeforeSpin = generators.freeCells(GameState).length;
 const handBeforeSpin = GameState.hand.slots.filter(Boolean).length;
 const L = hexMath.layout;
 fire('pointerdown', L.centerX + 150, L.centerY);       // справа от центра
+// первое движение только открывает жест: отсчёт берётся заново, иначе весь
+// накопленный до пробоя порога угол применился бы одним рывком
+fire('pointermove', L.centerX + 145, L.centerY + 30);
+check('первое движение только открывает жест, поле стоит',
+  GameState.camera.rotation === 0, 'угол ' + deg(GameState.camera.rotation).toFixed(1) + '°');
 fire('pointermove', L.centerX, L.centerY + 150);       // повернули на 90° по часовой
 check('жест по полю повернул поле', Math.abs(GameState.camera.rotation) > 0.1,
   'угол ' + deg(GameState.camera.rotation).toFixed(1) + '°');
@@ -880,6 +1040,30 @@ const spunCenter = render.handSlotCenter(spunSlot);
 check('слот руки ловится по экранным координатам при любом повороте',
   input.hitHandSlot(GameState, spunCenter.x, spunCenter.y) === spunSlot);
 
+// 7б. angleDelta: разница углов через ±π (Phase 16). Без нормализации
+// протаскивание через левую горизонталь давало почти полный оборот вместо
+// пары градусов — это и выглядело как «поле крутится само».
+check('angleDelta через ±π даёт короткую дугу',
+  Math.abs(deg(input.angleDelta(rad(179), rad(-179))) - 2) < 1e-9,
+  deg(input.angleDelta(rad(179), rad(-179))).toFixed(1) + '°');
+check('angleDelta в обратную сторону тоже короткая',
+  Math.abs(deg(input.angleDelta(rad(-179), rad(179))) + 2) < 1e-9,
+  deg(input.angleDelta(rad(-179), rad(179))).toFixed(1) + '°');
+check('angleDelta без разрыва работает как обычная разность',
+  Math.abs(deg(input.angleDelta(rad(10), rad(40))) - 30) < 1e-9);
+
+// 7в. мёртвая зона у центра: там на пиксель приходятся десятки градусов
+restart();
+resetCamera(GameState);
+fire('pointerdown', L.centerX + 4, L.centerY);
+fire('pointermove', L.centerX + 4, L.centerY + 30);   // порог пробит
+fire('pointermove', L.centerX - 20, L.centerY + 10);  // всё ещё у центра
+check('у центра поля жест не крутит поле', GameState.camera.rotation === 0,
+  'угол ' + deg(GameState.camera.rotation).toFixed(1) + '°');
+fire('pointerup', L.centerX - 20, L.centerY + 10);
+check('порог входа в жест поднят', CONFIG.camera.minDragToRotate >= 12);
+resetCamera(GameState);
+
 // 8. кнопка возврата и сбросы
 const resetBtn = render.resetCameraButtonRect();
 fire('pointerdown', resetBtn.x + resetBtn.w / 2, resetBtn.y + resetBtn.h / 2);
@@ -897,14 +1081,15 @@ restart();
 // шпион ставится ПОСЛЕ подготовки доски: setBoard перерисовывает кадр целиком,
 // и в него попали бы ещё и стопки из руки
 const spyTiles = (angleDeg) => {
-  applyTheme('paper');
+  const active = THEMES[themeNames[0]];
+  applyTheme(themeNames[0]);
   setBoard({ '2,-2': rep(0, 4) });
   GameState.camera.rotation = rad(angleDeg);
   const seen = [];
-  const original = THEMES.paper.tile;
-  THEMES.paper.tile = (ctx, x, y) => { seen.push({ x, y }); };
+  const original = active.tile;
+  active.tile = (ctx, x, y) => { seen.push({ x, y }); };
   render.drawStacks(GameState);
-  THEMES.paper.tile = original;
+  active.tile = original;
   return seen;
 };
 [0, 60, 180].forEach(angleDeg => {
