@@ -105,6 +105,177 @@ const CONFIG = {
                counterMs: 420,                  // счёт и кошелёк догоняют значение
                shakeMs: 260, shakeAmp: 9, shakeFromTiles: 15,
                overlayFadeMs: 260 },
+  // Звук. Синтезируется кодом: внешних файлов в проекте быть не может (ADR-0001).
+  // master: 0 глушит игру целиком, gain: 0 у голоса гасит один звук — как у juice.
+  audio:     { master: 0.35,
+               maxFlowTicks: 6,      // длинный перелив не строчит очередью
+               minGapMs: 30,         // одинаковые звуки ближе этого сливаются в один
+               comboSteps: [0, 2, 4, 7, 9, 12],   // пентатоника, полутоны
+
+               // Тембр «бумага и дерево» под стиль «Бумажный крафт». Дерево — это
+               // короткая атака и падающий питч; бумага — полоса шума, а не тон.
+               // Значения по умолчанию: их берёт голос, который своих не задал.
+               woodDrop: 0.45,       // во сколько раз питч падает за время звука
+               woodDecay: 0.18,      // затухание «тука», с
+               paperBand: 2600,      // центр полосы шороха бумаги, Гц
+               paperQ: 0.9,          // ширина полосы: меньше — шире и глуше
+               paperDecay: 0.13,     // затухание шороха, с
+
+               // Голос каждого события — единственное место, где правится тембр.
+               // gain — громкость; freq/drop/decay/type — тон дерева (drop больше
+               // единицы значит, что питч не падает, а растёт); band/q — полоса
+               // шороха бумаги; noiseGain/harmonic — громкость доп. слоя.
+               voices: {
+                 // Два самых частых коротких звука. Низкая широкая полоса даёт
+                 // шорох картона; высокая узкая давала щелчок (правка по playtest).
+                 pick:   { gain: 0.40, band: 950, q: 0.55, decay: 0.20 },
+                 snap:   { gain: 0.20, band: 750, q: 0.55, decay: 0.16 },
+
+                 place:  { gain: 0.80, freq: 300, decay: 0.14,
+                           noiseGain: 0.5, band: 1800, noiseDelay: 0.01 },
+                 flow:   { gain: 0.35, freq: 450, step: 36, decay: 0.07,
+                           drop: 0.7, type: 'sine' },
+                 burn:   { gain: 1.00, freq: 300, decay: 0.26, drop: 0.5,
+                           sizeCurve: 0.4,     // насколько питч падает с размером блока
+                           decayPerSize: 0.06, // крупный блок звучит ещё и дольше
+                           harmonic: 0.35, harmonicRatio: 2, harmonicDecay: 0.12,
+                           noiseGain: 0.6, band: 1400, noiseDecay: 0.22, noiseDelay: 0.02 },
+                 combo:  { gain: 0.90, freq: 600, decay: 0.30, drop: 0.85,
+                           harmonic: 0.4, harmonicRatio: 1.5,
+                           harmonicDecay: 0.22, harmonicDelay: 0.05 },
+                 ring:   { gain: 0.80, freq: 150, decay: 0.60, drop: 2, type: 'sine',
+                           noiseGain: 0.5, band: 900, noiseDecay: 0.5 },
+                 boost:  { gain: 0.70, freq: 480, decay: 0.22, drop: 1.6, type: 'sine',
+                           removeBand: 1200, removeQ: 0.5, removeDecay: 0.4,
+                           rerollTicks: 3, rerollGain: 0.7, rerollBand: 2400,
+                           rerollStep: 400, rerollDecay: 0.1, rerollDelay: 0.06 },
+                 deny:   { gain: 0.60, freq: 165, decay: 0.12, drop: 0.9, type: 'sine' },
+                 deal:   { gain: 0.45, ticks: 3, band: 2800, step: -300,
+                           decay: 0.09, delay: 0.05 },
+                 // полутоны финальной фразы: вверх при рекорде, иначе вниз
+                 over:   { gain: 0.90, freq: 300, decay: 0.40, drop: 0.8, delay: 0.16,
+                           record: [0, 4, 7], lost: [0, -3, -8] }
+               },
+
+               // Отправка эффектов в ту же комнату, что и музыка. Ноль — прежний
+               // сухой звук; много — эффекты «уплывают» и теряют читаемость.
+               roomSend: 0.18,
+
+               // Музыка (Phase 18, переписана по docs/music-brief.md).
+               // Не петля, а аранжировка: секции включают и выключают партии,
+               // аккорды меняются сами, у партий по нескольку рисунков. Главное
+               // требование брифа — музыка не стоит на месте и «дышит» каждые
+               // 15–30 секунд, оставаясь при этом фоном, а не событием.
+               //
+               // Бесшовности добиваться не нужно: музыка синтезируется непрерывно,
+               // а не склеивается из файла, поэтому точки склейки не существует.
+               // Последняя секция просто возвращает набор партий к вступлению.
+               music: { gain: 0.20,        // фон заметно тише эффектов
+                        tuning: 440,       // обычный строй
+                        bpm: 96,           // бриф: 90–105, жёсткие границы 88–108
+                        stepsPerBar: 8,    // восьмые в 4/4; шаг 0.3125 с, такт 2.5 с
+                        varyBars: 8,       // рисунок партии меняется раз в 8 тактов (20 с)
+
+                        // Против «дёшево». Сухой одинокий осциллятор всегда звучит
+                        // пищалкой; лечится тремя приёмами, и все бесплатные:
+                        // комната (импульс генерируем кодом — файлов быть не может),
+                        // пара расстроенных голосов вместо одного,
+                        // и фильтр, который закрывается вместе с нотой.
+                        reverbSec: 2.8, reverbDecay: 2.4, reverbMix: 0.55,
+                        detuneCents: 7,     // уже — стерильно, шире — расстроенно
+                        filterQ: 0.9,
+                        filterOpen: 4.5,    // во сколько раз выше тона открыт фильтр в атаке
+                        filterClose: 1.3,   // и до чего закрывается к концу ноты
+                        filterTension: 0.3, // на тесном поле чуть ярче — и только
+                        panSpread: 0.55,    // разброс по стерео
+                        velocityVary: 0.35, // разброс громкости: ровные ноты звучат механически
+
+                        lookaheadMs: 220,  // как часто просыпается планировщик
+                        scheduleAhead: 0.7,// на сколько секунд вперёд кладутся ноты
+                        maxStepsPerPump: 8,// потолок: часы могут прыгнуть вперёд
+                        roomyFrom: 8,      // свободных ячеек столько и больше — натяжение 0
+                        tightAt: 3,        // столько и меньше — натяжение 1
+
+                        // Гармония: тёплый мажор без тревоги, аккорд держится
+                        // chordBars такта. Мелодические партии берут ноты из
+                        // текущего аккорда, поэтому диссонансов нет по построению,
+                        // а гармония меняется сама («меняется гармония» из брифа).
+                        chordBars: 2,
+                        chords: [
+                          [0, 4, 7, 11],      // Imaj7
+                          [9, 12, 16, 19],    // vi7
+                          [5, 9, 12, 16],     // IVmaj7
+                          [7, 11, 14, 18]     // Vmaj7
+                        ],
+
+                        // Мотивы — «несколько коротких, постоянно меняющихся между
+                        // собой». at — шаг внутри такта, deg — ступень аккорда.
+                        motifs: [
+                          [{ at: 0, deg: 0 }, { at: 3, deg: 2 }, { at: 6, deg: 1 }],
+                          [{ at: 2, deg: 1 }, { at: 5, deg: 3 }],
+                          [{ at: 0, deg: 2 }, { at: 4, deg: 0 }, { at: 7, deg: 1 }],
+                          [{ at: 1, deg: 3 }, { at: 6, deg: 2 }]
+                        ],
+
+                        // Аранжировка на 104 такта ≈ 4:20 — структура из брифа.
+                        // Партии включаются и выключаются сами: инструмент
+                        // появляется и исчезает, и это половина «дыхания».
+                        arrangement: [
+                          { bars: 12, parts: ['texture', 'pad', 'piano'] },
+                          { bars: 24, parts: ['texture', 'pad', 'piano', 'shaker', 'bass'] },
+                          { bars: 24, parts: ['texture', 'pad', 'piano', 'shaker', 'bass',
+                                              'kalimba', 'click'] },
+                          { bars: 24, parts: ['texture', 'pad', 'marimba', 'shaker', 'bass',
+                                              'kalimba', 'click'] },
+                          { bars: 20, parts: ['texture', 'pad', 'piano', 'shaker'] }
+                        ],
+
+                        // Партии. tone — щипковые и пад (musicVoice), noise —
+                        // перкуссия и фактура (musicRustle). steps — рисунок внутри
+                        // такта, несколько вариантов: раз в varyBars берётся
+                        // следующий, и рисунок обновляется незаметно.
+                        //
+                        // Перкуссия стоит на слабых долях и заметно тише
+                        // мелодических партий: бриф требует «почти незаметную»,
+                        // без сильных ударов и без ощущения танца. Кика и малого
+                        // нет вовсе — «Loud Drums» в списке запрещённого.
+                        parts: {
+                          // тепло под всем; фон, а не голос — потому и тихо,
+                          // и фильтр открыт совсем немного
+                          pad:     { kind: 'chord', level: 0.10, octave: -1,
+                                     type: 'triangle', attack: 1.8, decay: 6.0, drop: 1,
+                                     filterOpen: 1.6, every: 2 },
+                          // «улыбка»: мягкая атака, без обертона — фетровое пианино
+                          piano:   { kind: 'motif', level: 0.30, octave: 0,
+                                     type: 'triangle', attack: 0.02, decay: 1.6, drop: 0.995,
+                                     motifs: [0, 1, 2] },
+                          // короткие ответы; нецелый обертон 2.76 — обертон
+                          // свободного бруска, им дерево и отличается от синтезатора
+                          kalimba: { kind: 'motif', level: 0.20, octave: 1,
+                                     type: 'sine', attack: 0.004, decay: 0.9, drop: 0.99,
+                                     overtone: 0.25, overtoneRatio: 2.76, overtoneDecay: 0.4,
+                                     motifs: [1, 3] },
+                          marimba: { kind: 'motif', level: 0.26, octave: 0,
+                                     type: 'triangle', attack: 0.004, decay: 1.1, drop: 0.99,
+                                     overtone: 0.2, overtoneRatio: 2.76, overtoneDecay: 0.35,
+                                     motifs: [2, 3, 0] },
+                          // опора, не «жёсткий бас»: мягкая атака, корень аккорда
+                          bass:    { kind: 'root', level: 0.34, octave: -2,
+                                     type: 'sine', attack: 0.03, decay: 1.2, drop: 0.98,
+                                     steps: [[0], [0, 4], [0, 5]] },
+                          // движение без танца: атака 0.02 — это выдох, а не щелчок
+                          shaker:  { kind: 'noise', gain: 0.10, band: 6200, q: 0.6,
+                                     attack: 0.02, decay: 0.12,
+                                     steps: [[1, 3, 5, 7], [1, 5], [1, 3, 5, 6, 7]],
+                                     tensionSteps: [2, 6] },
+                          // «неидеальность» ручной работы
+                          click:   { kind: 'noise', gain: 0.07, band: 2400, q: 0.8,
+                                     attack: 0.003, decay: 0.07,
+                                     steps: [[2], [6], [2, 6], []] },
+                          // бумага и плёнка под всем: длинный тихий шум внахлёст
+                          texture: { kind: 'noise', gain: 0.05, band: 1000, q: 0.4,
+                                     attack: 1.2, decay: 3.2, steps: [[0]] }
+                        } } },
   // Камера: панорама и зум поля. Игра работает и без них — поле всегда вписано.
   // Поворот поля: перетаскивание по полю вращает его вокруг центра, при отпускании
   // угол примагничивается к ближайшему кратному 60° (симметрия гекса).
@@ -122,6 +293,10 @@ const CONFIG = {
                { kind: 'reroll', cost: 30, label: 'Пересдача', instant: true, hint: '' },
                { kind: 'remove', cost: 40, label: 'Убрать',  hint: 'Выбери стопку, которую убрать' }
              ],
+  // Вибрация (Phase 18). Порог крупного сгорания общий с тряской экрана
+  // (animation.shakeFromTiles): отдача должна совпадать с картинкой.
+  // Массив — это чередование «вибрируем / пауза», миллисекунды.
+  haptics:   { enabled: true, burn: 18, combo: [12, 40, 24], over: 60 },
   // Платформа: SDK подгружается лениво и только на домене Яндекс Игр (ADR-0005).
   // Локально и на обычном хостинге сеть не используется вообще.
   platform:  { yandexHosts: ['yandex.net', 'yandex.ru', 'games.s3.yandex.net'],
@@ -309,6 +484,19 @@ const Platform = {
   showAd() { /* заглушка под SDK Яндекс/CrazyGames (v2) */ },
   onPause() { /* заглушка под SDK Яндекс/CrazyGames (v2) */ },
 
+  // Вибрация (Phase 18). На десктопе гаптики нет, и это не ошибка — просто
+  // тихо ничего не делаем, как и с недоступным хранилищем.
+  vibrate(pattern) {
+    if (!CONFIG.haptics.enabled) return false;
+    try {
+      if (typeof navigator === 'undefined' || !navigator.vibrate) return false;
+      navigator.vibrate(pattern);
+      return true;
+    } catch (e) {
+      return false;
+    }
+  },
+
   // --- Глобальный рейтинг через SDK платформы (ADR-0005) --------------------
   // Игра остаётся одним файлом: SDK не входит в артефакт и подгружается только
   // на домене Яндекса. Любая ошибка платформы не должна ломать партию.
@@ -374,6 +562,541 @@ const Platform = {
         }))
       }))
       .catch(() => ({ available: false, entries: [] }));
+  }
+};
+
+// ============================================================================
+// Audio — единственная точка доступа к Web Audio API. Игра нигде не создаёт
+// контекст сама и не знает, из чего сложен звук: наружу торчат события, а не
+// синтез. Всё синтезируется кодом — внешних файлов в проекте быть не может
+// (ADR-0001). Ошибка звука не должна ломать партию, поэтому throw наружу нет.
+// Имя перекрывает встроенный конструктор Audio (элемент audio): он не нужен,
+// загружать через него всё равно нечего.
+// ============================================================================
+const Audio = {
+  ctx: null,
+  master: null,
+  noise: null,     // буфер шума под «бумажные» звуки, готовится один раз
+  lastAt: {},      // когда в последний раз играл звук с таким именем
+
+  // Контекст создаётся только по жесту пользователя — раньше браузер его не даст.
+  // Зовётся из pointerdown и keydown; повторный вызов лишь будит уснувший контекст.
+  unlock() {
+    if (Audio.ctx) {
+      try {
+        if (Audio.ctx.state === 'suspended') Audio.ctx.resume();
+      } catch (e) {
+        /* контекст уже живой — будить нечего */
+      }
+      return true;
+    }
+    try {
+      const Ctor = typeof AudioContext !== 'undefined' ? AudioContext
+        : (typeof webkitAudioContext !== 'undefined' ? webkitAudioContext : null);
+      if (!Ctor) return false;
+      Audio.ctx = new Ctor();
+      Audio.master = Audio.ctx.createGain();
+      Audio.master.gain.value = CONFIG.audio.master;
+      Audio.master.connect(Audio.ctx.destination);
+      Audio.buildRoom();
+      Audio.noise = Audio.makeNoise();
+      Audio.startMusic();      // фон заводится тем же первым жестом
+      return true;
+    } catch (e) {
+      Audio.ctx = null;   // без звука играть можно, без игры — нет
+      return false;
+    }
+  },
+
+  // Комната. Сухой синтез звучит дёшево: без отражений ухо слышит пищалку, а не
+  // инструмент в помещении. Импульс генерируем кодом — звуковых файлов в проекте
+  // быть не может (ADR-0001). Музыка уходит сюда целиком, эффекты — долей roomSend:
+  // им нужна читаемость, расплывшийся щелчок хуже сухого.
+  buildRoom() {
+    const ctx = Audio.ctx;
+    const m = CONFIG.audio.music;
+    Audio.room = ctx.createConvolver();
+    Audio.room.buffer = Audio.makeImpulse(m.reverbSec, m.reverbDecay);
+    Audio.roomMix = ctx.createGain();
+    Audio.roomMix.gain.value = m.reverbMix;
+    Audio.room.connect(Audio.roomMix);
+    Audio.roomMix.connect(Audio.master);
+    Audio.sfxSend = ctx.createGain();
+    Audio.sfxSend.gain.value = CONFIG.audio.roomSend;
+    Audio.sfxSend.connect(Audio.room);
+  },
+
+  // Импульс комнаты — затухающий шум в двух каналах. Каналы разные, иначе
+  // отражения сойдутся в точку посередине и стерео пропадёт.
+  makeImpulse(seconds, decay) {
+    const ctx = Audio.ctx;
+    const length = Math.max(1, Math.floor(ctx.sampleRate * seconds));
+    const buffer = ctx.createBuffer(2, length, ctx.sampleRate);
+    for (let channel = 0; channel < 2; channel++) {
+      const data = buffer.getChannelData(channel);
+      let seed = 7 + channel;
+      for (let i = 0; i < data.length; i++) {
+        seed = (seed * 1664525 + 1013904223) >>> 0;
+        data[i] = (seed / 2147483648 - 1) * Math.pow(1 - i / data.length, decay);
+      }
+    }
+    return buffer;
+  },
+
+  // Полсекунды шума хватает на любой шорох. Генерируем один раз: делать буфер
+  // в момент события — это аллокация на каждый звук.
+  // Свой генератор, а не Math.random: в логике игры его быть не должно.
+  makeNoise() {
+    const ctx = Audio.ctx;
+    const buffer = ctx.createBuffer(1, Math.floor(ctx.sampleRate * 0.5), ctx.sampleRate);
+    const data = buffer.getChannelData(0);
+    let seed = 1;
+    for (let i = 0; i < data.length; i++) {
+      seed = (seed * 1664525 + 1013904223) >>> 0;
+      data[i] = seed / 2147483648 - 1;
+    }
+    return buffer;
+  },
+
+  // Задел под экран настроек (Phase 19): громкость меняется на живом контексте
+  setMaster(value) {
+    CONFIG.audio.master = value;
+    if (Audio.master) Audio.master.gain.value = value;
+  },
+
+  // --- Примитивы синтеза ----------------------------------------------------
+
+  // Все числа тембра лежат в CONFIG.audio.voices — здесь только их применение
+  voice(name) {
+    return CONFIG.audio.voices[name] || {};
+  },
+
+  // Громкость звука с учётом общей. Ноль означает «не играть вовсе».
+  gainFor(name) {
+    return CONFIG.audio.master * (Audio.voice(name).gain || 0);
+  },
+
+  // Одинаковый звук не чаще, чем раз в minGapMs: за один waveCommit может
+  // сгореть несколько ячеек, а три одинаковых «тука» в один сэмпл дают щелчок.
+  ready(name) {
+    if (!Audio.ctx || !Audio.gainFor(name)) return false;
+    const now = Audio.ctx.currentTime * 1000;
+    const last = Audio.lastAt[name];
+    if (last !== undefined && now - last < CONFIG.audio.minGapMs) return false;
+    Audio.lastAt[name] = now;
+    return true;
+  },
+
+  // «Дерево»: короткая атака, падающий питч, экспоненциальное затухание.
+  // drop больше единицы означает, что питч не падает, а растёт.
+  // mul (а не gain) — множитель для дополнительных слоёв: так объект голоса
+  // целиком можно передать сюда, и его собственный gain не удвоится.
+  tone(name, freq, opts) {
+    const o = opts || {};
+    const gain = Audio.gainFor(name) * (o.mul || 1);
+    if (!Audio.ctx || !gain) return false;
+    const ctx = Audio.ctx;
+    const at = ctx.currentTime + (o.delay || 0);
+    const dur = o.decay || CONFIG.audio.woodDecay;
+    const osc = ctx.createOscillator();
+    const env = ctx.createGain();
+    osc.type = o.type || 'triangle';
+    osc.frequency.setValueAtTime(freq, at);
+    osc.frequency.exponentialRampToValueAtTime(freq * (o.drop || CONFIG.audio.woodDrop), at + dur);
+    // до нуля экспонентой нельзя, поэтому гасим до тысячной доли
+    env.gain.setValueAtTime(gain, at);
+    env.gain.exponentialRampToValueAtTime(gain * 0.001, at + dur);
+    osc.connect(env);
+    env.connect(Audio.master);
+    if (Audio.sfxSend) env.connect(Audio.sfxSend);   // доля в общую комнату
+    osc.start(at);
+    osc.stop(at + dur);
+    return true;
+  },
+
+  // «Бумага»: полоса шума вместо тона — этим шорох и отличается от «тука»
+  rustle(name, opts) {
+    const o = opts || {};
+    const gain = Audio.gainFor(name) * (o.mul || 1);
+    if (!Audio.ctx || !gain) return false;
+    const a = CONFIG.audio;
+    const ctx = Audio.ctx;
+    const at = ctx.currentTime + (o.delay || 0);
+    const dur = o.decay || a.paperDecay;
+    const band = o.band || a.paperBand;
+    const src = ctx.createBufferSource();
+    const filter = ctx.createBiquadFilter();
+    const env = ctx.createGain();
+    src.buffer = Audio.noise;
+    filter.type = 'bandpass';
+    filter.Q.value = o.q || a.paperQ;
+    // полоса едет вниз: у бумаги призвук темнеет к концу движения
+    filter.frequency.setValueAtTime(band * 1.4, at);
+    filter.frequency.exponentialRampToValueAtTime(band, at + dur);
+    env.gain.setValueAtTime(gain, at);
+    env.gain.exponentialRampToValueAtTime(gain * 0.001, at + dur);
+    src.connect(filter);
+    filter.connect(env);
+    env.connect(Audio.master);
+    if (Audio.sfxSend) env.connect(Audio.sfxSend);   // доля в общую комнату
+    src.start(at);
+    src.stop(at + dur);
+    return true;
+  },
+
+  // --- События игры ---------------------------------------------------------
+  // Ноты планируются от ctx.currentTime, а не по кадрам: звук не держит RAF и
+  // не участвует в цикле эффектов, поэтому правило «juice < 1000 мс» его не
+  // касается. Вызывать эти методы можно только из input и драйверов main —
+  // mergeEngine обязан оставаться беззвучным (там же живёт синхронный путь).
+
+  pick() {
+    if (!Audio.ready('pick')) return false;
+    return Audio.rustle('pick', Audio.voice('pick'));
+  },
+
+  place() {
+    if (!Audio.ready('place')) return false;
+    const v = Audio.voice('place');
+    Audio.tone('place', v.freq, v);
+    Audio.rustle('place', { mul: v.noiseGain, band: v.band, delay: v.noiseDelay });
+    return true;
+  },
+
+  // Перелив: по щелчку на фишку, питч растёт вместе с высотой будущей стопки.
+  // Длинный перелив подрезан maxFlowTicks — иначе выйдет очередь.
+  flow(count, stepSec) {
+    if (!Audio.ready('flow')) return false;
+    const v = Audio.voice('flow');
+    const ticks = Math.min(count || 1, CONFIG.audio.maxFlowTicks);
+    for (let i = 0; i < ticks; i++) {
+      Audio.tone('flow', v.freq + i * v.step,
+        Object.assign({}, v, { delay: i * (stepSec || 0.05) }));
+    }
+    return true;
+  },
+
+  // Чем крупнее сгоревший блок, тем ниже и длиннее голос: десятку от двадцатки
+  // слышно, не глядя на счёт.
+  burn(tiles) {
+    if (!Audio.ready('burn')) return false;
+    const v = Audio.voice('burn');
+    const size = Math.min(tiles || CONFIG.merge.burnThreshold, 30) / CONFIG.merge.burnThreshold;
+    const freq = v.freq / Math.pow(size, v.sizeCurve);
+    Audio.tone('burn', freq, Object.assign({}, v, { decay: v.decay + size * v.decayPerSize }));
+    // призвук октавой выше — всегда синус, иначе он спорит с основным тоном
+    Audio.tone('burn', freq * v.harmonicRatio,
+      { mul: v.harmonic, decay: v.harmonicDecay, type: 'sine' });
+    Audio.rustle('burn', { mul: v.noiseGain, band: v.band,
+                           decay: v.noiseDecay, delay: v.noiseDelay });
+    return true;
+  },
+
+  // Звено цепочки: та же деревянная нота, но ступенью выше по пентатонике
+  combo(link) {
+    if (!Audio.ready('combo')) return false;
+    const v = Audio.voice('combo');
+    const steps = CONFIG.audio.comboSteps;
+    const semitones = steps[Math.max(0, Math.min(link - 1, steps.length - 1))];
+    const freq = v.freq * Math.pow(2, semitones / 12);
+    Audio.tone('combo', freq, v);
+    Audio.tone('combo', freq * v.harmonicRatio,
+      { mul: v.harmonic, decay: v.harmonicDecay, drop: v.drop,
+        delay: v.harmonicDelay, type: 'sine' });
+    return true;
+  },
+
+  // Новое кольцо: низкое восходящее скольжение — поле стало больше
+  ring() {
+    if (!Audio.ready('ring')) return false;
+    const v = Audio.voice('ring');
+    Audio.tone('ring', v.freq, v);
+    Audio.rustle('ring', { mul: v.noiseGain, band: v.band, decay: v.noiseDecay });
+    return true;
+  },
+
+  boost(kind) {
+    if (!Audio.ready('boost')) return false;
+    const v = Audio.voice('boost');
+    if (kind === 'remove') {                            // стопка рассыпается
+      Audio.rustle('boost', { band: v.removeBand, q: v.removeQ, decay: v.removeDecay });
+    } else if (kind === 'reroll') {                     // рука тасуется
+      for (let i = 0; i < v.rerollTicks; i++) {
+        Audio.rustle('boost', { mul: v.rerollGain, band: v.rerollBand + i * v.rerollStep,
+                                decay: v.rerollDecay, delay: i * v.rerollDelay });
+      }
+    } else {                                            // дуга переноса
+      Audio.tone('boost', v.freq, v);
+    }
+    return true;
+  },
+
+  // Отказ: глухой «тук» почти без падения питча — ничего не произошло
+  deny() {
+    if (!Audio.ready('deny')) return false;
+    const v = Audio.voice('deny');
+    return Audio.tone('deny', v.freq, v);
+  },
+
+  snap() {
+    if (!Audio.ready('snap')) return false;
+    return Audio.rustle('snap', Audio.voice('snap'));
+  },
+
+  deal() {
+    if (!Audio.ready('deal')) return false;
+    const v = Audio.voice('deal');
+    for (let i = 0; i < v.ticks; i++) {
+      Audio.rustle('deal', { band: v.band + i * v.step, decay: v.decay, delay: i * v.delay });
+    }
+    return true;
+  },
+
+  // Конец партии: три ноты вниз, а при новом рекорде — вверх
+  over(isRecord) {
+    if (!Audio.ready('over')) return false;
+    const v = Audio.voice('over');
+    (isRecord ? v.record : v.lost).forEach((semitones, i) => {
+      Audio.tone('over', v.freq * Math.pow(2, semitones / 12),
+        Object.assign({}, v, { delay: i * v.delay }));
+    });
+    return true;
+  },
+
+  // --- Музыка ---------------------------------------------------------------
+  // У фона свой планировщик, и это обязательно: RAF в затишье останавливается
+  // совсем, и петля, повешенная на кадры, рвалась бы каждый раз, когда игрок
+  // думает над ходом. Раз в lookaheadMs просыпаемся и раскладываем ноты на
+  // scheduleAhead секунд вперёд по часам AudioContext — они идут сами по себе.
+  //
+  // Именно setInterval, а не setTimeout: в тестах setTimeout выполняется
+  // немедленно, и петля, перезаводящая саму себя, ушла бы в бесконечную
+  // рекурсию. Здесь тик просто не вызывают, и всё стоит.
+
+  room: null, roomMix: null, sfxSend: null,
+  music: { timer: null, nextAt: 0, step: 0, tension: 0, out: null },
+
+  startMusic() {
+    const m = CONFIG.audio.music;
+    if (!Audio.ctx || Audio.music.timer || !m.gain) return false;
+    const ctx = Audio.ctx;
+    Audio.music.out = ctx.createGain();
+    Audio.music.out.gain.value = m.gain;
+    Audio.music.out.connect(Audio.master);
+    if (Audio.room) Audio.music.out.connect(Audio.room);   // музыка в комнате целиком
+    Audio.music.nextAt = ctx.currentTime;
+    Audio.music.step = 0;
+    Audio.music.timer = setInterval(Audio.pumpMusic, m.lookaheadMs);
+    Audio.pumpMusic();
+    return true;
+  },
+
+  stopMusic() {
+    if (Audio.music.timer === null) return false;
+    clearInterval(Audio.music.timer);
+    Audio.music.timer = null;
+    return true;
+  },
+
+  // Разложить ноты вперёд. Потолок обязателен: часы могут прыгнуть (в тестах они
+  // прыгают на секунду за кадр), и цикл без предела крутился бы вечно.
+  pumpMusic() {
+    if (!Audio.ctx || !Audio.music.out) return false;
+    const m = CONFIG.audio.music;
+    const stepSec = Audio.stepSec();
+    const until = Audio.ctx.currentTime + m.scheduleAhead;
+    let placed = 0;
+    while (Audio.music.nextAt < until && placed < m.maxStepsPerPump) {
+      Audio.musicStep(Audio.music.step, Audio.music.nextAt);
+      Audio.music.step++;
+      Audio.music.nextAt += stepSec;
+      placed++;
+    }
+    return placed > 0;
+  },
+
+  // --- Аранжировка ----------------------------------------------------------
+
+  // Длительность шага: stepsPerBar долей на такт в размере 4/4
+  stepSec() {
+    const m = CONFIG.audio.music;
+    return 60 / m.bpm / (m.stepsPerBar / 4);
+  },
+
+  // Тактов в полном цикле аранжировки
+  loopBars() {
+    return CONFIG.audio.music.arrangement.reduce((sum, section) => sum + section.bars, 0);
+  },
+
+  // Какая секция играет на этом такте цикла
+  sectionAt(loopBar) {
+    const arrangement = CONFIG.audio.music.arrangement;
+    let from = 0;
+    for (let i = 0; i < arrangement.length; i++) {
+      if (loopBar < from + arrangement[i].bars) return arrangement[i];
+      from += arrangement[i].bars;
+    }
+    return arrangement[arrangement.length - 1];
+  },
+
+  // Аккорд держится chordBars такта, дальше цикл идёт по кругу
+  chordAt(loopBar) {
+    const m = CONFIG.audio.music;
+    return m.chords[Math.floor(loopBar / m.chordBars) % m.chords.length];
+  },
+
+  // Шаг аранжировки: секция решает, какие инструменты сейчас звучат, аккорд —
+  // какими нотами. Точки склейки у цикла нет: музыка синтезируется непрерывно,
+  // а последняя секция просто возвращает набор партий к вступлению.
+  musicStep(step, at) {
+    const m = CONFIG.audio.music;
+    const bars = Audio.loopBars();
+    const bar = Math.floor(step / m.stepsPerBar);
+    const beat = step - bar * m.stepsPerBar;
+    const loopBar = ((bar % bars) + bars) % bars;
+    const chord = Audio.chordAt(loopBar);
+    Audio.sectionAt(loopBar).parts.forEach(name => {
+      Audio.playPart(m.parts[name], loopBar, beat, chord, at, step);
+    });
+  },
+
+  // Один инструмент на одном шаге. Рисунок берётся по номеру такта и обновляется
+  // раз в varyBars — это и есть «дыхание»: изменение раз в 15–30 секунд, которое
+  // игрок чувствует, но не опознаёт.
+  playPart(part, loopBar, beat, chord, at, step) {
+    if (!part) return false;
+    const m = CONFIG.audio.music;
+    const out = Audio.music.out;
+    const cycle = Math.floor(loopBar / m.varyBars);
+    if (part.every && loopBar % part.every !== 0) return false;
+
+    if (part.kind === 'chord') {          // пад: весь аккорд разом, только с такта
+      if (beat !== 0) return false;
+      chord.forEach((semitones, i) => {
+        Audio.musicNote(part, semitones, part.octave, part.level, part.attack,
+          part.decay, at, out, step + i * 13, part.drop, part.filterOpen);
+      });
+      return true;
+    }
+    if (part.kind === 'root') {           // бас: корень аккорда по своему рисунку
+      if (part.steps[cycle % part.steps.length].indexOf(beat) === -1) return false;
+      Audio.musicNote(part, chord[0], part.octave, part.level, part.attack,
+        part.decay, at, out, step, part.drop);
+      return true;
+    }
+    if (part.kind === 'motif') {          // мелодия: ступени текущего аккорда
+      const motif = m.motifs[part.motifs[cycle % part.motifs.length]];
+      const hits = motif.filter(note => note.at === beat);
+      hits.forEach(note => {
+        Audio.musicNote(part, chord[note.deg % chord.length], part.octave, part.level,
+          part.attack, part.decay, at, out, step + note.deg);
+      });
+      return hits.length > 0;
+    }
+    // шум: перкуссия и фактура. tensionSteps — вся адаптивность, которая
+    // осталась: на тесном поле шейкер получает пару лишних позиций, и только.
+    let steps = part.steps[cycle % part.steps.length];
+    if (part.tensionSteps && Audio.music.tension >= 0.5) {
+      steps = steps.concat(part.tensionSteps);
+    }
+    if (steps.indexOf(beat) === -1) return false;
+    Audio.musicRustle(part, at, out);
+    return true;
+  },
+
+  // Нота-деревяшка: щипок с падающим питчем плюс нецелый обертон. Именно
+  // нецелая доля (2.76 — обертон свободного бруска) отличает удар по дереву
+  // от синтезатора: у струны обертоны кратные, у бруска нет.
+  musicNote(cfg, semitones, octave, peak, attack, decay, at, out, seed, dropOverride, filterOpen) {
+    const m = CONFIG.audio.music;
+    const drop = dropOverride || cfg.drop;
+    const freq = m.tuning * Math.pow(2, octave + semitones / 12);
+    // Живой инструмент каждый раз чуть другой: ровные по громкости и всегда
+    // центральные ноты и создают ощущение дешёвой машины. Шум детерминированный
+    // (тот же render.noise, что и у бумажной фактуры) — партия остаётся повторяемой.
+    const key = seed || 0;
+    const level = peak * (1 - m.velocityVary * render.noise(key, 17));
+    const pan = (render.noise(key, 29) - 0.5) * 2 * m.panSpread;
+    Audio.musicVoice(cfg.type, freq, drop, level, attack, decay, at, out, pan, filterOpen);
+    if (cfg.overtone) {
+      Audio.musicVoice('sine', freq * cfg.overtoneRatio, drop, level * cfg.overtone,
+        attack, decay * cfg.overtoneDecay, at, out, pan * 0.6, filterOpen);
+    }
+  },
+
+  // Голос музыки: пара расстроенных осцилляторов через фильтр, конверт и панораму.
+  // Пара — против «дёшево»: один осциллятор всегда звучит тонко и стерильно,
+  // а расстройка в несколько центов даёт биения, которые ухо слышит как объём.
+  musicVoice(type, freq, drop, peak, attack, decay, at, out, pan, filterOpen) {
+    const ctx = Audio.ctx;
+    const m = CONFIG.audio.music;
+    const filter = ctx.createBiquadFilter();
+    const env = ctx.createGain();
+    const panner = ctx.createStereoPanner();
+
+    // Фильтр закрывается вместе с нотой: дерево тускнеет, а не звенит ровно до
+    // конца. На тесном поле открыт чуть шире — на грани заметного, без драмы.
+    // Пад передаёт свой filterOpen: ему нужен заваленный верх, иначе он вылезет
+    // на первый план, а бриф отводит ему роль воздуха под инструментами.
+    filter.type = 'lowpass';
+    filter.Q.value = m.filterQ;
+    filter.frequency.setValueAtTime(
+      freq * (filterOpen || m.filterOpen) * (1 + Audio.music.tension * m.filterTension), at);
+    filter.frequency.exponentialRampToValueAtTime(freq * m.filterClose, at + decay);
+
+    panner.pan.value = pan;
+    // экспонентой до нуля нельзя, гасим до тысячной доли
+    env.gain.setValueAtTime(peak * 0.001, at);
+    env.gain.exponentialRampToValueAtTime(peak, at + attack);
+    env.gain.exponentialRampToValueAtTime(peak * 0.001, at + decay);
+
+    filter.connect(env);
+    env.connect(panner);
+    panner.connect(out);
+
+    for (let i = 0; i < 2; i++) {
+      const osc = ctx.createOscillator();
+      osc.type = type;
+      osc.detune.value = i ? m.detuneCents : -m.detuneCents;
+      osc.frequency.setValueAtTime(freq, at);
+      osc.frequency.exponentialRampToValueAtTime(freq * drop, at + decay);
+      osc.connect(filter);
+      osc.start(at);
+      osc.stop(at + decay);
+    }
+  },
+
+  // Бумажный слой музыки — тот же приём, что и у эффектов: полоса шума, не тон.
+  // Им же сделаны хэт и малый барабан: у них те же поля, только числа другие.
+  musicRustle(spec, at, out) {
+    const ctx = Audio.ctx;
+    const src = ctx.createBufferSource();
+    const filter = ctx.createBiquadFilter();
+    const env = ctx.createGain();
+    src.buffer = Audio.noise;
+    filter.type = 'bandpass';
+    filter.Q.value = spec.q;
+    filter.frequency.setValueAtTime(spec.band * 1.5, at);
+    filter.frequency.exponentialRampToValueAtTime(spec.band, at + spec.decay);
+    env.gain.setValueAtTime(spec.gain * 0.001, at);
+    env.gain.exponentialRampToValueAtTime(spec.gain, at + spec.attack);
+    env.gain.exponentialRampToValueAtTime(spec.gain * 0.001, at + spec.decay);
+    src.connect(filter);
+    filter.connect(env);
+    env.connect(out);
+    src.start(at);
+    src.stop(at + spec.decay);
+  },
+
+  // Натяжение 0…1: 0 — спокойный слой, 1 — динамичный. Что именно считать
+  // тревогой, решает игра (updateMusicTension), здесь только число.
+  // Натяжение 0…1. Слоями оно больше не переключает: бриф запрещает музыке
+  // требовать внимания, поэтому теснота поля лишь чуть уплотняет перкуссию
+  // (tensionSteps) и чуть приоткрывает фильтр. Что считать тревогой, по-прежнему
+  // решает updateMusicTension в main.
+  setTension(value) {
+    Audio.music.tension = Math.max(0, Math.min(1, value));
+    return Audio.music.out !== null;
   }
 };
 
@@ -1601,6 +2324,14 @@ const input = {
     return cell && !cell.stack ? cell : null;
   },
 
+  // Ячейка поля под экранной точкой — любая, занятая или пустая. Координаты
+  // экранные, поэтому переводим их в мировые: поле-то повёрнуто.
+  cellAt(state, x, y) {
+    const world = input.screenToWorld(state, x, y);
+    const a = hexMath.pixelToAxial(world.x, world.y);
+    return state.cells.get(hexMath.key(a.q, a.r)) || null;
+  },
+
 
   // Попадание точки в прямоугольник кнопки
   hitRect(rect, x, y) {
@@ -1623,9 +2354,9 @@ const input = {
       state.boost = null;
       return;
     }
-    if (state.isAnimating || state.isGameOver) return;
+    if (state.isAnimating || state.isGameOver) { Audio.deny(); return; }
     const config = input.boostConfig(kind);
-    if (state.coins < config.cost) return;
+    if (state.coins < config.cost) { Audio.deny(); return; }   // не хватило монет
     // буст несовместим с перетаскиванием стопки из руки
     if (state.drag) {
       state.hand.slots[state.drag.srcSlot] = state.drag.stack;
@@ -1646,6 +2377,7 @@ const input = {
     generators.dealHand(state);
     state.boost = null;
     spendCoins(state, config.cost);
+    Audio.boost(config.kind);
     state.isAnimating = true;
     state.handAnim = { old, t: 0 };
     animate(state, CONFIG.animation.handSwapMs,
@@ -1670,7 +2402,7 @@ const input = {
   // Клик по ячейке в режиме буста
   applyBoostTo(state, cell) {
     const boost = state.boost;
-    if (!input.isBoostTarget(state, cell)) return;
+    if (!input.isBoostTarget(state, cell)) { Audio.deny(); return; }
     const config = input.boostConfig(boost.kind);
 
     // Доска меняется сразу, а анимация показывает переход — тот же приём, что и
@@ -1679,6 +2411,7 @@ const input = {
       const tiles = cell.stack.tiles.slice();
       cell.stack = null;
       spawnScatter(state, cell, tiles);
+      Audio.boost(boost.kind);
       startFx(state);
       input.finishBoost(state, config.cost, [cell]);
       return;
@@ -1692,6 +2425,7 @@ const input = {
     cell.stack = source.stack;
     cell.stack.cell = { q: cell.q, r: cell.r };
     source.stack = null;
+    Audio.boost(boost.kind);
     input.finishBoost(state, config.cost, [cell],
       input.boostFlight([{ tiles: cell.stack.tiles, from: source, to: cell }]));
   },
@@ -1735,6 +2469,9 @@ const input = {
     // Нажатие: кнопки → рука → вращение поля (в этом порядке приоритета)
     canvas.addEventListener('pointerdown', (event) => {
       const point = input.toCanvasCoords(canvas, event);
+      // первый жест — единственный момент, когда браузер разрешает завести звук.
+      // Здесь проходит любое касание канваса, все ранние return идут ниже.
+      Audio.unlock();
 
       // экран рейтинга поверх всего: реагирует только кнопка «Назад»
       if (state.leaderboard && state.leaderboard.open) {
@@ -1768,9 +2505,7 @@ const input = {
 
       // активный буст: клик по полю выбирает ячейку, а не вращает и не ставит стопку
       if (state.boost) {
-        const world = input.screenToWorld(state, point.x, point.y);
-        const axial = hexMath.pixelToAxial(world.x, world.y);
-        const target = state.cells.get(hexMath.key(axial.q, axial.r));
+        const target = input.cellAt(state, point.x, point.y);
         if (target) input.applyBoostTo(state, target);
         return;
       }
@@ -1785,13 +2520,18 @@ const input = {
           x: world.x, y: world.y - CONFIG.ui.dragLift
         };
         state.hoverKey = null;
+        Audio.pick();
         // захват указателя: события идут сюда, даже если палец ушёл за канвас
         if (canvas.setPointerCapture) canvas.setPointerCapture(event.pointerId);
         requestRender();
         return;
       }
 
-      // мимо руки и кнопок — начинаем вращать поле
+      // Вращать поле можно только от гекса. Иначе жест начинался бы по остаточному
+      // принципу — «мимо руки и кнопок», то есть и по счёту, и по панели бустов,
+      // и по пустым полям у краёв экрана: промах мимо слота проворачивал доску.
+      if (!input.cellAt(state, point.x, point.y)) return;
+
       input.spin = {
         pointerId: event.pointerId,
         startAngle: input.angleFromCenter(point.x, point.y),
@@ -1855,6 +2595,7 @@ const input = {
           input.placeStack(state, d.stack, cell);
         } else {
           state.hand.slots[d.srcSlot] = d.stack;   // отмена: занятая ячейка или вне поля
+          Audio.deny();
         }
         state.drag = null;
         state.hoverKey = null;
@@ -1880,6 +2621,7 @@ const input = {
       const d = state.drag;
       if (!d || d.pointerId !== event.pointerId) return;
       state.hand.slots[d.srcSlot] = d.stack;
+      Audio.deny();
       state.drag = null;
       state.hoverKey = null;
       requestRender();
@@ -1887,6 +2629,7 @@ const input = {
 
     // Клавиатура: R — заново, Esc — отменить активный буст
     window.addEventListener('keydown', (event) => {
+      Audio.unlock();   // клавиатура — отдельный вход, канваса игрок мог и не касаться
       if (event.code === 'Escape' && state.boost) {
         state.boost = null;
         requestRender();
@@ -1903,6 +2646,7 @@ const input = {
     stack.cell = { q: cell.q, r: cell.r };
     cell.stack = stack;
     state.showHint = false;                       // подсказка гаснет после первого хода
+    Audio.place();
     // «приземление» стопки, затем разрешение цепочки; ввод заблокирован уже сейчас
     state.isAnimating = true;
     state.landing = { cell, t: 0 };
@@ -2085,8 +2829,15 @@ function waveCommit(state, plan, ctx) {
   // вспышка на сгоревших ячейках; она же пауза, иначе цепочка мелькает
   if (res.burns.length) {
     res.burns.forEach(burn => spawnBurnFx(state, burn, res.combo));
+    Audio.burn(res.burns[0].count);
+    // вибрация — на тех же крупных сгораниях, что и тряска экрана
+    if (res.burns[0].count >= CONFIG.animation.shakeFromTiles) {
+      Platform.vibrate(CONFIG.haptics.burn);
+    }
     // со второго звена цепочки показываем комбо и бонус, который оно принесло
     if (res.combo >= 2) {
+      Audio.combo(res.combo);
+      Platform.vibrate(CONFIG.haptics.combo);
       state.fx.floats.push({
         cell: res.burns[0].cell, age: 0, accent: true,
         text: 'Комбо ×' + res.combo + (res.comboCoins ? '  +' + res.comboCoins : '')
@@ -2114,6 +2865,11 @@ function animateFlows(state, plan, done) {
     filled.set(key, f.baseLayer + f.count);
   });
   plan.flows.forEach(f => { f.finalTotal = filled.get(hexMath.key(f.to.q, f.to.r)); });
+
+  // звук ложится на ту же дугу, что и картинка: шаг между щелчками — это
+  // flowStagger от длительности шага волны
+  const tiles = plan.flows.reduce((sum, f) => sum + f.count, 0);
+  Audio.flow(tiles, CONFIG.animation.flowStagger * CONFIG.animation.waveStepMs / 1000);
 
   state.anim = { flows: plan.flows, t: 0 };
   animate(state, CONFIG.animation.waveStepMs,
@@ -2143,12 +2899,17 @@ function finishWave(state) {
   // как счёт открыл новое кольцо
   const grew = growBoardIfNeeded(state);
   // рука опустела полностью → новая раздача (уже с учётом освободившихся ячеек)
-  if (state.hand.slots.every(s => s === null)) generators.dealHand(state);
+  if (state.hand.slots.every(s => s === null)) {
+    generators.dealHand(state);
+    Audio.deal();
+  }
   updateBest(state);
   checkGameOver(state);
+  updateMusicTension(state);   // после checkGameOver: на проигрыше фон успокаивается
 
   if (grew) {
     // новое кольцо проявляется, ввод до конца анимации заблокирован
+    Audio.ring();
     animate(state, CONFIG.animation.ringGrowMs,
       (t) => { state.newRing.t = render.ease.outCubic(t); },
       () => { state.newRing = null; state.isAnimating = false; requestRender(); });
@@ -2196,6 +2957,7 @@ function snapRotation(state) {
     requestRender();
     return;
   }
+  Audio.snap();
   animate(state, CONFIG.animation.snapMs,
     (t) => { state.camera.rotation = from + (to - from) * render.ease.smooth(t); },
     () => { state.camera.rotation = to; requestRender(); });
@@ -2258,12 +3020,30 @@ function spendCoins(state, amount) {
   startFx(state);
 }
 
+// Насколько тревожно звучит фон. Считаем здесь, а не в Audio: это игровое
+// правило, а секция звука знает только число 0…1.
+//
+// Меряем тесноту, а не счёт. Счёт врал бы: он только растёт, и после крупного
+// сгорания музыка продолжала бы нагнетать над пустым полем. Свободные ячейки
+// падают и растут вместе с реальным положением дел.
+function updateMusicTension(state) {
+  const m = CONFIG.audio.music;
+  if (state.isGameOver) return Audio.setTension(0);   // партия кончилась, нагнетать незачем
+  const free = generators.freeCells(state).length;
+  if (free >= m.roomyFrom) return Audio.setTension(0);
+  if (free <= m.tightAt) return Audio.setTension(1);
+  return Audio.setTension((m.roomyFrom - free) / (m.roomyFrom - m.tightAt));
+}
+
 // Проигрыш: на поле нет свободных ячеек, а в руке ещё есть стопки
 function checkGameOver(state) {
   if (generators.freeCells(state).length > 0) return;
   if (state.hand.slots.every(s => s === null)) return;
   state.isGameOver = true;
   state.overlayT = 0;                     // оверлей проявляется, а не выпрыгивает
+  // признак рекорда считается так же, как в оверлее: updateBest уже отработал
+  Audio.over(state.score >= state.best && state.score > 0);
+  Platform.vibrate(CONFIG.haptics.over);
   startFx(state);
   Platform.submitScore(state.score);      // на платформе уйдёт в глобальный рейтинг
 }
@@ -2311,6 +3091,9 @@ function restart() {
   GameState.overlayT = 1;
   generators.fillStartBoard(GameState);
   generators.dealHand(GameState);
+  // во время init контекста ещё нет — первая раздача проходит молча сама собой
+  Audio.deal();
+  updateMusicTension(GameState);
   requestRender();
 }
 

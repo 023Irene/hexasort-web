@@ -53,16 +53,78 @@ const documentStub = {
 };
 const locationStub = { search: '', host: 'localhost' };
 
-js += '\nmodule.exports = { CONFIG, Platform, hexMath, generators, mergeEngine, GameState, render,' +
+// Заглушка Web Audio: настоящих узлов нет, каждый источник звука пишет в журнал
+// свою частоту и момент запуска — по нему и делаются проверки, как по store для
+// localStorage. audioNow — это ctx.currentTime, тесты двигают его вручную.
+let audioContexts = 0;
+let audioNow = 0;
+const audioLog = [];
+const audioParam = (rec, key) => ({
+  value: 0,
+  setValueAtTime: (v) => { rec[key] = v; },
+  exponentialRampToValueAtTime: () => {}
+});
+const audioNode = () => ({ value: 0, setValueAtTime: () => {},
+                           exponentialRampToValueAtTime: () => {},
+                           setTargetAtTime: () => {} });
+function AudioContextStub() {
+  audioContexts++;
+  this.sampleRate = 44100;
+  this.state = 'running';
+  this.destination = { connect: () => {} };
+  this.resume = () => { this.state = 'running'; };
+  Object.defineProperty(this, 'currentTime', { get: () => audioNow });
+  this.createGain = () => ({ gain: audioNode(), connect: () => {} });
+  this.createOscillator = () => {
+    const rec = { kind: 'osc', freq: 0, at: 0 };
+    return { type: '', frequency: audioParam(rec, 'freq'), detune: audioNode(),
+             connect: () => {},
+             start: (at) => { rec.at = at; audioLog.push(rec); }, stop: () => {} };
+  };
+  this.createStereoPanner = () => ({ pan: audioNode(), connect: () => {} });
+  this.createConvolver = () => ({ buffer: null, connect: () => {} });
+  this.createBufferSource = () => {
+    const rec = { kind: 'noise', freq: 0, at: 0 };
+    return { buffer: null, connect: () => {},
+             start: (at) => { rec.at = at; audioLog.push(rec); }, stop: () => {} };
+  };
+  this.createBiquadFilter = () => ({ type: '', Q: audioNode(),
+                                     frequency: audioNode(), connect: () => {} });
+  this.createBuffer = (channels, length) => ({ getChannelData: () => new Float32Array(length) });
+}
+
+// Планировщик музыки. Интервал только записываем и НЕ выполняем: часы и RAF
+// здесь синхронные, и живой тик увёл бы тесты в бесконечный цикл. Тесты дёргают
+// Audio.pumpMusic вручную.
+let intervalSeq = 0;
+const intervals = {};
+const setIntervalStub = (fn, ms) => { intervals[++intervalSeq] = { fn, ms }; return intervalSeq; };
+const clearIntervalStub = (id) => { delete intervals[id]; };
+
+// Вибрация: на десктопе её нет, поэтому заглушка ещё и журналит вызовы
+const vibrations = [];
+const navigatorStub = { vibrate: (pattern) => { vibrations.push(pattern); return true; } };
+
+js += '\nmodule.exports = { CONFIG, Platform, Audio, hexMath, generators, mergeEngine, GameState, render,' +
   ' input, restart, updateActiveColors, renderGameToText, radiusForScore, growBoardIfNeeded,' +
-  ' resetCamera, nearestSnapAngle, snapRotation, THEMES, applyTheme };';
+  ' resetCamera, nearestSnapAngle, snapRotation, THEMES, applyTheme, updateMusicTension };';
 const mod = { exports: {} };
 new Function('module', 'localStorage', 'requestAnimationFrame', 'document', 'performance',
-  'setTimeout', 'window', 'location', js)
-  (mod, localStorageStub, raf, documentStub, perf, timeout, windowStub, locationStub);
-const { CONFIG, Platform, hexMath, generators, mergeEngine, GameState, render, input, restart,
+  'setTimeout', 'window', 'location', 'AudioContext', 'setInterval', 'clearInterval',
+  'navigator', js)
+  (mod, localStorageStub, raf, documentStub, perf, timeout, windowStub, locationStub,
+   AudioContextStub, setIntervalStub, clearIntervalStub, navigatorStub);
+const { CONFIG, Platform, Audio, hexMath, generators, mergeEngine, GameState, render, input, restart,
   updateActiveColors, renderGameToText, radiusForScore, growBoardIfNeeded,
-  resetCamera, nearestSnapAngle, snapRotation, THEMES, applyTheme } = mod.exports;
+  resetCamera, nearestSnapAngle, snapRotation, THEMES, applyTheme,
+  updateMusicTension } = mod.exports;
+
+// Звук между проверками надо гасить: журнал общий, а троттлинг помнит прошлый вызов
+const audioReset = () => { audioLog.length = 0; Audio.lastAt = {}; };
+const audioFreqs = () => audioLog.filter(n => n.kind === 'osc').map(n => n.freq);
+// Снимок надо взять здесь: проверки Phase 17 идут после десятков pointerdown,
+// а контекст к тому моменту уже заведён — «до жеста его нет» там не проверить.
+const audioCtxAtStart = Audio.ctx;
 
 let ok = true;
 const check = (name, cond, extra = '') => {
@@ -563,6 +625,302 @@ check('подсказка видна на старте', GameState.showHint === 
 input.placeStack(GameState, { tiles: [0], cell: null }, anyFreeCell());
 check('подсказка гаснет после первого хода', GameState.showHint === false);
 
+console.log('\n--- Phase 18: музыка и вибрация ---');
+
+// 1. планировщик заводится первым жестом и ровно один раз
+check('музыка заведена первым жестом', Audio.music.timer !== null);
+check('повторный запуск планировщик не дублирует', Audio.startMusic() === false);
+check('шина музыки создана', Audio.music.out !== null);
+
+// 2. ноты раскладываются вперёд по часам AudioContext, а не по кадрам
+audioNow = 100;
+Audio.music.nextAt = audioNow;
+audioReset();
+Audio.pumpMusic();
+const musicAhead = audioLog.length;
+check('планировщик раскладывает ноты вперёд', musicAhead > 0, 'нот=' + musicAhead);
+check('все ноты назначены не раньше текущего времени',
+  audioLog.every(n => n.at >= audioNow - 1e-9));
+check('ноты не уходят дальше горизонта планирования',
+  audioLog.every(n => n.at <= audioNow + CONFIG.audio.music.scheduleAhead + 1e-9));
+
+// 3. предохранитель: часы прыгнули далеко вперёд — цикл обязан упереться в потолок.
+// Считаем шаги, а не ноты: на шаг приходится сколько угодно осцилляторов.
+audioNow = 100;
+Audio.music.nextAt = 0;          // как будто планировщик проспал сто секунд
+audioReset();
+const stepBeforeJump = Audio.music.step;
+Audio.pumpMusic();
+const stepsAfterJump = Audio.music.step - stepBeforeJump;
+check('скачок часов не зацикливает планировщик',
+  stepsAfterJump > 0 && stepsAfterJump <= CONFIG.audio.music.maxStepsPerPump,
+  'шагов=' + stepsAfterJump + ' потолок=' + CONFIG.audio.music.maxStepsPerPump);
+audioNow = 0;
+Audio.music.nextAt = 0;
+audioReset();
+
+// 4. натяжение считает игра: меряем тесноту поля, а не счёт
+const fillBoard = (occupied) => {
+  restart();
+  let n = 0;
+  GameState.cells.forEach(c => {
+    c.stack = n++ < occupied ? { tiles: [0, 0], cell: { q: c.q, r: c.r } } : null;
+  });
+  GameState.isGameOver = false;
+};
+const mus = CONFIG.audio.music;
+const total = GameState.cells.size;
+const tensionAt = (free) => { fillBoard(total - free); updateMusicTension(GameState); return Audio.music.tension; };
+check('просторное поле — натяжение 0', tensionAt(mus.roomyFrom + 2) === 0);
+check('на границе roomyFrom всё ещё 0', tensionAt(mus.roomyFrom) === 0);
+check('тесное поле — натяжение 1', tensionAt(mus.tightAt) === 1);
+check('совсем без места — тоже 1', tensionAt(1) === 1);
+const middle = Math.round((mus.roomyFrom + mus.tightAt) / 2);
+const middleTension = tensionAt(middle);
+check('между порогами натяжение промежуточное',
+  middleTension > 0 && middleTension < 1, 'натяжение=' + middleTension.toFixed(2));
+check('чем теснее, тем выше натяжение', tensionAt(mus.tightAt + 1) > middleTension);
+
+// 5. на проигрыше фон успокаивается: нагнетать уже незачем
+fillBoard(total);
+GameState.isGameOver = true;
+updateMusicTension(GameState);
+check('на проигрыше натяжение падает в ноль', Audio.music.tension === 0);
+GameState.isGameOver = false;
+
+// 6. музыка глушится числом, как и всё остальное
+Audio.stopMusic();
+check('stopMusic гасит планировщик', Audio.music.timer === null);
+const musicGainWas = CONFIG.audio.music.gain;
+CONFIG.audio.music.gain = 0;
+check('music.gain 0 не заводит планировщик вообще',
+  Audio.startMusic() === false && Audio.music.timer === null);
+CONFIG.audio.music.gain = musicGainWas;
+Audio.startMusic();
+check('планировщик снова заведён', Audio.music.timer !== null);
+
+// 7. строй и тембр
+check('строй обычный, 440', mus.tuning === 440);
+audioReset();
+Audio.musicNote(mus.parts.kalimba, 0, 0, 0.5, 0.1, 0.5,
+  Audio.ctx.currentTime, Audio.music.out);
+check('нота строится от tuning',
+  Math.abs(audioFreqs()[0] - mus.tuning) < 1e-6, 'получилось ' + audioFreqs()[0]);
+// частот две (тон и обертон), а осцилляторов больше: каждый голос — пара
+// расстроенных, расстройка идёт через detune и частоту не меняет
+const partials = [...new Set(audioFreqs().map(f => Math.round(f * 100) / 100))];
+check('нота звучит с обертоном, а не голым тоном', partials.length === 2,
+  'частот ' + partials.length);
+check('каждый голос — пара осцилляторов, иначе звучит тонко',
+  audioFreqs().length === partials.length * 2, 'осцилляторов ' + audioFreqs().length);
+check('обертон нецелый — этим дерево и отличается от синтезатора',
+  Math.abs(partials[1] / partials[0] - Math.round(partials[1] / partials[0])) > 0.1,
+  'отношение ' + (partials[1] / partials[0]).toFixed(2));
+
+// у музыки есть бумажный слой — тот же словарь, что и у эффектов
+audioReset();
+Audio.musicRustle(mus.parts.texture, Audio.ctx.currentTime, Audio.music.out);
+check('у музыки есть бумажный слой', audioLog.some(n => n.kind === 'noise'));
+
+// комната: сухой синтез — главная причина, по которой звук слышится дешёвым
+check('комната построена', Audio.room !== null && Audio.roomMix !== null);
+check('эффекты уходят в комнату долей', Audio.sfxSend !== null);
+audioReset();
+
+// 8. аранжировка: бриф требует цикл 3–5 минут и структуру, а не вечную петлю
+const barSec = Audio.stepSec() * mus.stepsPerBar;
+const loopSec = Audio.loopBars() * barSec;
+check('темп внутри границ брифа 88–108', mus.bpm >= 88 && mus.bpm <= 108, 'bpm=' + mus.bpm);
+check('цикл аранжировки длится 3–5 минут', loopSec >= 180 && loopSec <= 300,
+  Math.round(loopSec) + ' с');
+check('в аранжировке несколько секций', mus.arrangement.length >= 4);
+check('сумма тактов секций равна длине цикла',
+  mus.arrangement.reduce((s, x) => s + x.bars, 0) === Audio.loopBars());
+check('первый и последний такт цикла — в разных секциях аранжировки',
+  Audio.sectionAt(0) !== Audio.sectionAt(Audio.loopBars() - 1));
+check('вступление беднее середины',
+  Audio.sectionAt(0).parts.length < Audio.sectionAt(Math.floor(Audio.loopBars() / 2)).parts.length);
+
+// 9. гармония меняется сама и замыкается в круг
+check('аккорд держится chordBars такта',
+  Audio.chordAt(0) === Audio.chordAt(mus.chordBars - 1) &&
+  Audio.chordAt(0) !== Audio.chordAt(mus.chordBars));
+check('цикл аккордов замыкается',
+  Audio.chordAt(0) === Audio.chordAt(mus.chordBars * mus.chords.length));
+
+// 10. дыхание: рисунок партии обновляется раз в varyBars, музыка не стоит на месте
+const shakerBeats = (loopBar) => {
+  const hits = [];
+  for (let beat = 0; beat < mus.stepsPerBar; beat++) {
+    audioReset();
+    Audio.playPart(mus.parts.shaker, loopBar, beat, Audio.chordAt(loopBar), 0, 0);
+    if (audioLog.length) hits.push(beat);
+  }
+  return hits.join(',');
+};
+check('рисунок партии меняется с номером такта',
+  shakerBeats(0) !== shakerBeats(mus.varyBars), shakerBeats(0) + ' → ' + shakerBeats(mus.varyBars));
+check('дыхание укладывается в 15–30 секунд брифа',
+  mus.varyBars * barSec >= 15 && mus.varyBars * barSec <= 30,
+  Math.round(mus.varyBars * barSec) + ' с');
+
+// 11. партия звучит только там, где перечислена в секции
+const introParts = Audio.sectionAt(0).parts;
+check('калимбы во вступлении нет', introParts.indexOf('kalimba') === -1);
+check('фактура и пад есть с самого начала',
+  introParts.indexOf('texture') !== -1 && introParts.indexOf('pad') !== -1);
+
+// 12. перкуссия мягкая и почти незаметная — прямое требование брифа
+check('ударных с киком и малым больше нет',
+  !mus.parts.kick && !mus.parts.snare);
+check('перкуссия тише мелодических партий',
+  mus.parts.shaker.gain < mus.parts.piano.level &&
+  mus.parts.click.gain < mus.parts.piano.level,
+  'шейкер ' + mus.parts.shaker.gain + ' против фортепиано ' + mus.parts.piano.level);
+check('шейкер выдыхает, а не щёлкает: атака заметно длиннее щелчка',
+  mus.parts.shaker.attack >= 0.01, 'атака ' + mus.parts.shaker.attack);
+check('пад тише всех — он воздух, а не голос',
+  mus.parts.pad.level < mus.parts.piano.level);
+
+// 13. натяжение влияет слабо: бриф запрещает музыке требовать внимания
+const barDensity = (tension) => {
+  Audio.setTension(tension);
+  audioReset();
+  for (let beat = 0; beat < mus.stepsPerBar; beat++) {
+    Audio.musicStep(mus.stepsPerBar * 20 + beat, 0);
+  }
+  return audioLog.length;
+};
+const calmBar = barDensity(0);
+const tightBar = barDensity(1);
+check('на тесном поле плотнее, но не драматично',
+  tightBar > calmBar && tightBar <= calmBar * 1.35,
+  calmBar + ' → ' + tightBar);
+Audio.setTension(0);
+audioReset();
+
+// 8. вибрация: журнал заглушки, выключатель и отсутствие гаптики
+vibrations.length = 0;
+check('вибрация уходит в navigator', Platform.vibrate(20) === true && vibrations.length === 1);
+CONFIG.haptics.enabled = false;
+check('выключенная вибрация молчит', Platform.vibrate(20) === false && vibrations.length === 1);
+CONFIG.haptics.enabled = true;
+const vibrateWas = navigatorStub.vibrate;
+delete navigatorStub.vibrate;
+check('без гаптики вибрация не падает', Platform.vibrate(20) === false);
+navigatorStub.vibrate = vibrateWas;
+
+// крупное сгорание отдаёт в руку — порог общий с тряской экрана
+restart();
+GameState.cells.forEach(c => { c.stack = null; });
+cell('0,0').stack = { tiles: rep(0, 9), cell: { q: 0, r: 0 } };
+cell('1,0').stack = { tiles: rep(0, 6), cell: { q: 1, r: 0 } };
+vibrations.length = 0;
+input.placeStack(GameState, { tiles: [0], cell: null }, cell('0,-1'));
+check('крупное сгорание отдаёт вибрацией', vibrations.length > 0,
+  'вызовов=' + vibrations.length);
+restart();
+
+console.log('\n--- Phase 17: звук ---');
+
+// 1. контекст ленивый: снимок сделан сразу после загрузки, до первого жеста
+check('в init контекст не создаётся — жеста ещё не было', audioCtxAtStart === null);
+check('первый жест завёл контекст', Audio.ctx !== null);
+check('контекст создан ровно один раз на все жесты партии',
+  audioContexts === 1, 'создано ' + audioContexts);
+
+// 2. AudioContext живёт только внутри секции Audio (как localStorage внутри Platform)
+const audioSection = js.slice(js.indexOf('const Audio = {'), js.indexOf('const hexMath = {'));
+const outsideAudio = stripComments(js.replace(audioSection, ''));
+check('обращений к AudioContext вне Audio нет',
+  !outsideAudio.includes('AudioContext'),
+  'найдено вне Audio: ' + (outsideAudio.match(/AudioContext/g) || []).length);
+check('внутри Audio AudioContext используется', audioSection.includes('AudioContext'));
+
+// 3. mergeEngine беззвучен: синхронный resolveWave выполняется в тестах и обязан
+// оставаться чистым, иначе два драйвера волны разойдутся
+const mergeSection = js.slice(js.indexOf('const mergeEngine = {'), js.indexOf('const render = {'));
+check('в mergeEngine звук не вызывается', !stripComments(mergeSection).includes('Audio.'));
+setBoard({ '0,0': [0, 0], '1,0': [0, 0, 0] });
+audioReset();
+mergeEngine.resolveWave(GameState, cell('0,0'));
+check('синхронный resolveWave не издаёт ни звука', audioLog.length === 0,
+  'нот=' + audioLog.length);
+
+// 4. размер сгоревшего блока слышен: больше фишек — ниже голос
+audioReset();
+Audio.burn(CONFIG.merge.burnThreshold);
+const burnSmall = audioFreqs()[0];
+audioReset();
+Audio.burn(CONFIG.merge.burnThreshold * 2);
+const burnBig = audioFreqs()[0];
+check('крупное сгорание звучит ниже мелкого', burnBig < burnSmall,
+  burnBig.toFixed(1) + ' < ' + burnSmall.toFixed(1));
+
+// 5. каждое следующее звено комбо — ступенью выше
+audioReset();
+Audio.combo(2);
+const combo2 = audioFreqs()[0];
+audioReset();
+Audio.combo(3);
+const combo3 = audioFreqs()[0];
+check('третье звено комбо выше второго', combo3 > combo2,
+  combo3.toFixed(1) + ' > ' + combo2.toFixed(1));
+
+// 6. громкость глушит звук числом, как juice глушится нулём в animation
+const masterWas = CONFIG.audio.master;
+CONFIG.audio.master = 0;
+audioReset();
+Audio.burn(10); Audio.place(); Audio.combo(3); Audio.ring();
+check('master = 0 глушит игру целиком', audioLog.length === 0, 'нот=' + audioLog.length);
+CONFIG.audio.master = masterWas;
+const pickWas = CONFIG.audio.voices.pick.gain;
+CONFIG.audio.voices.pick.gain = 0;
+audioReset();
+Audio.pick();
+check('gain: 0 у голоса гасит один звук', audioLog.length === 0);
+CONFIG.audio.voices.pick.gain = pickWas;
+
+// 7. троттлинг: одинаковые звуки подряд сливаются в один
+audioReset();
+Audio.burn(10);
+const burnNotes = audioLog.length;
+Audio.burn(10);
+Audio.burn(10);
+check('три одинаковых звука подряд звучат один раз',
+  audioLog.length === burnNotes, 'нот=' + audioLog.length + ' вместо ' + burnNotes);
+
+// 8. отсутствие Web Audio не ломает партию
+const ctxWas = Audio.ctx;
+Audio.ctx = null;
+audioReset();
+let audioThrew = false;
+try {
+  Audio.pick(); Audio.place(); Audio.flow(4, 0.02); Audio.burn(12); Audio.combo(2);
+  Audio.ring(); Audio.boost('move'); Audio.boost('remove'); Audio.boost('reroll');
+  Audio.deny(); Audio.snap(); Audio.deal(); Audio.over(true); Audio.over(false);
+  // unlock здесь звать нельзя: заглушка AudioContext на месте, и контекст
+  // просто пересоздастся. Ветку «Web Audio в браузере нет» закрывает try/catch
+  // внутри unlock, а идемпотентность — проверка audioContexts === 1 выше.
+} catch (e) {
+  audioThrew = true;
+}
+check('без Web Audio ни один звук не падает', !audioThrew);
+check('без контекста звуки молчат и возвращают false',
+  audioLog.length === 0 && Audio.pick() === false);
+Audio.ctx = ctxWas;
+
+// 9. живой ход озвучен, и длинный перелив не строчит очередью
+restart();
+audioReset();
+input.placeStack(GameState, { tiles: [0, 0], cell: null }, anyFreeCell());
+check('ход игрока озвучен', audioLog.length > 0, 'нот=' + audioLog.length);
+audioReset();
+Audio.flow(40, 0.02);
+check('длинный перелив подрезан maxFlowTicks',
+  audioLog.length === CONFIG.audio.maxFlowTicks, 'нот=' + audioLog.length);
+audioReset();
+
 console.log('\n--- Phase 16: анимации бустов и комбо ---');
 
 // 1. анимация бустов: стопка летит, а не телепортируется
@@ -1062,6 +1420,47 @@ check('у центра поля жест не крутит поле', GameState.
   'угол ' + deg(GameState.camera.rotation).toFixed(1) + '°');
 fire('pointerup', L.centerX - 20, L.centerY + 10);
 check('порог входа в жест поднят', CONFIG.camera.minDragToRotate >= 12);
+resetCamera(GameState);
+
+// 7г. зона жеста: крутить поле можно только от гекса (правка по playtest).
+// Раньше жест начинался «мимо руки и кнопок», то есть и по счёту, и по краям
+// экрана: промах мимо слота проворачивал доску.
+restart();
+resetCamera(GameState);
+check('cellAt находит ячейку под точкой поля',
+  input.cellAt(GameState, L.centerX, L.centerY) !== null);
+check('cellAt за пределами поля отдаёт null',
+  input.cellAt(GameState, 10, 10) === null);
+
+// протаскивание по счёту наверху
+fire('pointerdown', CONFIG.canvas.width / 2, 40);
+fire('pointermove', CONFIG.canvas.width / 2 - 40, 70);
+fire('pointermove', CONFIG.canvas.width / 2 - 120, 150);
+check('протаскивание по счёту поле не крутит', GameState.camera.rotation === 0,
+  'угол ' + deg(GameState.camera.rotation).toFixed(1) + '°');
+check('жест вне поля вообще не начинается', input.spin === null);
+fire('pointerup', CONFIG.canvas.width / 2 - 120, 150);
+
+// протаскивание по пустому месту сбоку от поля
+resetCamera(GameState);
+fire('pointerdown', 8, CONFIG.ui.boardArea.top + 20);
+fire('pointermove', 40, CONFIG.ui.boardArea.top + 60);
+fire('pointermove', 120, CONFIG.ui.boardArea.top + 160);
+check('протаскивание у края экрана поле не крутит', GameState.camera.rotation === 0,
+  'угол ' + deg(GameState.camera.rotation).toFixed(1) + '°');
+fire('pointerup', 120, CONFIG.ui.boardArea.top + 160);
+
+// а по занятому гексу — крутит, как и раньше. Ячейку берём заведомо далеко от
+// центра: у центра жест не работает по другой причине (мёртвая зона выше).
+resetCamera(GameState);
+cell('2,-1').stack = { tiles: [0, 0], cell: { q: 2, r: -1 } };
+fire('pointerdown', L.centerX + 150, L.centerY);
+fire('pointermove', L.centerX + 145, L.centerY + 30);
+fire('pointermove', L.centerX, L.centerY + 150);
+check('жест по занятому гексу поле крутит',
+  Math.abs(GameState.camera.rotation) > 0.1,
+  'угол ' + deg(GameState.camera.rotation).toFixed(1) + '°');
+fire('pointerup', L.centerX, L.centerY + 150);
 resetCamera(GameState);
 
 // 8. кнопка возврата и сбросы
@@ -1595,7 +1994,7 @@ check('в index.html нет внешних подключений (script src / 
   !/\bimport\s+.*from\b/.test(js) && !/\brequire\(/.test(js));
 check('канвас один', (html.match(/<canvas/g) || []).length === 1);
 check('все секции спеки §14 на месте',
-  ['const CONFIG', 'const Platform', 'const hexMath', 'const generators',
+  ['const CONFIG', 'const Platform', 'const Audio', 'const hexMath', 'const generators',
     'const mergeEngine', 'const render', 'const input', 'const GameState']
     .every(marker => js.includes(marker)));
 
