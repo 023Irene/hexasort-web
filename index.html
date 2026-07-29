@@ -40,14 +40,27 @@
 // ============================================================================
 const CONFIG = {
   canvas:    { width: 720, height: 900 },
+  // Текущий язык интерфейса (Phase 23). Ставится по браузеру в init и
+  // переопределяется выбором игрока; сами тексты — в секции I18N.
+  lang:      'ru',
   // Поле растёт кольцами по счёту: 19 -> 37 -> 61 ячейки (ADR-0004).
   // Гексы при этом уменьшаются, чтобы поле целиком помещалось в канвас.
   board:     { startFillPercent: 0.30,
-               // Каждое новое кольцо приносит +3 цвета: 4 -> 7 -> 10
+               // Лестница сложности (ADR-0007, пересмотрена по замерам Phase 21).
+               // Цвета добавляются по одному, а не по три: замер показал, что
+               // число цветов — единственный настоящий рычаг сложности, и скачок
+               // +3 обрывал партию сразу после порога, где бы тот ни стоял.
+               // Радиус в соседних ступенях повторяется намеренно: и рост поля,
+               // и набор цветов берут последнюю подходящую ступень, поэтому
+               // промежуточные ступени — это числа, а не правка логики.
                radiusSteps: [
                  { fromScore: 0,    radius: 2, colors: 4  },
-                 { fromScore: 1000, radius: 3, colors: 7  },
-                 { fromScore: 2500, radius: 4, colors: 10 }
+                 { fromScore: 1000, radius: 3, colors: 5  },   // второе кольцо
+                 { fromScore: 1600, radius: 3, colors: 6  },
+                 { fromScore: 2500, radius: 4, colors: 7  },   // третье кольцо
+                 { fromScore: 3200, radius: 4, colors: 8  },
+                 { fromScore: 4200, radius: 4, colors: 9  },
+                 { fromScore: 5500, radius: 4, colors: 10 }
                ] },
   hex:       { orientation: 'flat', maxSize: 55 },
   // Ступени стопок: с ростом счёта появляются двух- и трёхцветные, высота растёт.
@@ -79,8 +92,13 @@ const CONFIG = {
   // (10 -> 10, 13 -> 16, 20 -> 30). Множителя цепочки нет (ADR-0004).
   // Комбо платит монетами, а не очками: второе звено цепочки даёт +comboCoinBonus,
   // третье +2×, и так далее. Множитель очков остаётся отменённым.
+  //
+  // Монеты платят только за фишки СВЕРХ порога сгорания (ADR-0007): блок из 10
+  // не даёт ничего, 13 даёт 3, 25 даёт 15. Раньше платили за каждую фишку, и за
+  // партию набегало полторы тысячи монет при цене буста 25 — кошелёк ничего не
+  // ограничивал. Теперь монета — награда за крупный блок, а не за факт игры.
   scoring:   { burnBaseTiles: 10, pointsPerTileBase: 1, pointsPerTileOver: 2,
-               coinsPerBurnedTile: 1, comboCoinBonus: 5 },
+               coinsPerBurnedTile: 1, coinsFreeTiles: 10, comboCoinBonus: 10 },
   // Милосердие — «мягкий старт»: работает только до disableAfterScore очков
   mercy:     { threshold: 2, disableAfterScore: 300 },
   // Анимации. Всё, что ниже пустой строки, — juice (Phase 15): обнуление любого
@@ -107,7 +125,11 @@ const CONFIG = {
                overlayFadeMs: 260 },
   // Звук. Синтезируется кодом: внешних файлов в проекте быть не может (ADR-0001).
   // master: 0 глушит игру целиком, gain: 0 у голоса гасит один звук — как у juice.
-  audio:     { master: 0.35,
+  //
+  // volumeSfx и music.volume — это регуляторы экрана настроек (Phase 19), а не
+  // калибровка: множители 0…1 поверх master и music.gain. Единица означает
+  // «как задумано», поэтому подбор тембра и подбор громкости игроком не спорят.
+  audio:     { master: 0.35, volumeSfx: 1,
                maxFlowTicks: 6,      // длинный перелив не строчит очередью
                minGapMs: 30,         // одинаковые звуки ближе этого сливаются в один
                comboSteps: [0, 2, 4, 7, 9, 12],   // пентатоника, полутоны
@@ -128,7 +150,10 @@ const CONFIG = {
                voices: {
                  // Два самых частых коротких звука. Низкая широкая полоса даёт
                  // шорох картона; высокая узкая давала щелчок (правка по playtest).
-                 pick:   { gain: 0.40, band: 950, q: 0.55, decay: 0.20 },
+                 // Взятие стопки звучало щелчком не из-за частоты, а из-за
+                 // мгновенной атаки (правка по playtest, Phase 23). Теперь
+                 // громкость нарастает за attack — это вздох, а не «чик».
+                 pick:   { gain: 0.30, band: 600, q: 0.40, decay: 0.28, attack: 0.03 },
                  snap:   { gain: 0.20, band: 750, q: 0.55, decay: 0.16 },
 
                  place:  { gain: 0.80, freq: 300, decay: 0.14,
@@ -171,6 +196,7 @@ const CONFIG = {
                // а не склеивается из файла, поэтому точки склейки не существует.
                // Последняя секция просто возвращает набор партий к вступлению.
                music: { gain: 0.20,        // фон заметно тише эффектов
+                        volume: 1,         // регулятор игрока (Phase 19), см. volumeSfx
                         tuning: 440,       // обычный строй
                         bpm: 96,           // бриф: 90–105, жёсткие границы 88–108
                         stepsPerBar: 8,    // восьмые в 4/4; шаг 0.3125 с, такт 2.5 с
@@ -288,10 +314,12 @@ const CONFIG = {
   // Бусты за монеты. Сгорание десятки даёт 10 монет — буст стоит 2-4 сгорания.
   // Три буста решают три разные задачи: где лежит стопка, что лежит в руке,
   // сколько на поле места. instant — буст без выбора ячейки, срабатывает сразу.
+  // label и hint — ключи в I18N, а не готовые строки (Phase 23): подписи на
+  // кнопках больше не рисуются, но подсказка активного буста переводится.
   boosts:    [
-               { kind: 'move',   cost: 25, label: 'Перенос', hint: 'Выбери стопку, потом свободную ячейку' },
-               { kind: 'reroll', cost: 30, label: 'Пересдача', instant: true, hint: '' },
-               { kind: 'remove', cost: 40, label: 'Убрать',  hint: 'Выбери стопку, которую убрать' }
+               { kind: 'move',   cost: 25, label: 'boostMove',   hint: 'hintMove' },
+               { kind: 'reroll', cost: 30, label: 'boostReroll', instant: true, hint: '' },
+               { kind: 'remove', cost: 40, label: 'boostRemove', hint: 'hintRemove' }
              ],
   // Вибрация (Phase 18). Порог крупного сгорания общий с тряской экрана
   // (animation.shakeFromTiles): отдача должна совпадать с картинкой.
@@ -303,9 +331,15 @@ const CONFIG = {
                sdkUrl: 'https://yandex.ru/games/sdk/v2',
                leaderboardName: 'hexasort_score', leaderboardTop: 10 },
   storage:   { bestKey: 'hexasort_best', coinsKey: 'hexasort_coins',
+               // настройки игрока одним ключом-объектом: их трое, и растить
+               // хранилище по ключу на регулятор незачем
+               settingsKey: 'hexasort_settings',
                // версия экономики: при её росте прежний рекорд несопоставим с новой
                // шкалой и сбрасывается один раз (ADR-0004)
-               economyKey: 'hexasort_economy', economyVersion: 2 },
+               // версия 3 (Phase 23): в Phase 21 сменились и шкала прогрессии,
+               // и формула монет, поэтому прежние рекорд и кошелёк несопоставимы
+               // с новыми — сбрасываются один раз оба
+               economyKey: 'hexasort_economy', economyVersion: 3 },
 
   // Оформление и геометрия отрисовки
   ui: {
@@ -318,17 +352,34 @@ const CONFIG = {
     boardArea: { top: 90, bottom: 610, sideMargin: 20 },
     scoreY: 62,
     bestY: 40,
+    bestX: 652,              // правый край строки рекорда: левее шестерёнки настроек
+    trophySize: 20,          // кубок слева от строки рекорда (Phase 22)
+    trophyGap: 14,
     coinsY: 40,              // кошелёк слева, симметрично рекорду справа
     coinsX: 24,
     coinColor: '#F1C40F',
     coinRadius: 9,
     hintY: 655,
-    hintText: 'Ставь стопку рядом с таким же цветом',
     handY: 782,              // центр ряда слотов руки
     handSlotSpacing: 175,    // расстояние между центрами слотов
     handHexSize: 42,
+    // Экран настроек (Phase 19). Кнопка — в правом верхнем углу, поэтому строка
+    // рекорда и заканчивается раньше (bestX). Своих цветов у экрана нет: всё
+    // берётся из палитры интерфейса темы, иначе стиль пришлось бы дублировать.
+    settings: { button: { size: 44, margin: 16, top: 18 },
+                titleY: 200,
+                rowY: [300, 385, 470, 555],   // звуки, музыка, вибрация, язык
+                labelX: 130,             // подписи слева, регуляторы справа
+                sliderX: 330, sliderW: 240, sliderH: 10, knob: 15,
+                toggleW: 84, toggleH: 40, toggleRadius: 20, toggleKnob: 15,
+                langW: 66, langH: 40, langGap: 12, langRadius: 10,
+                step: 0.05 },            // округление ползунка: 5 % на деление
     // панель бустов под рукой
-    boostBar: { y: 846, w: 214, h: 42, gap: 10, radius: 11,
+    // Кнопки бустов: значок крупно, под ним цена. Подписей нет (Phase 23) —
+    // действие объясняет сам значок, а при активном бусте ещё и подсказка под
+    // полем. Высота подобрана так, чтобы не наехать ни на руку, ни на нижний край.
+    boostBar: { y: 824, w: 120, h: 64, gap: 14, radius: 12,
+                iconSize: 26, iconY: 22, priceY: 47,
                 fill: '#2C3E50', fillActive: '#3A5068', stroke: '#34495E',
                 strokeActive: '#8FA8BF' },
     // Перетаскивание
@@ -360,6 +411,98 @@ const CONFIG = {
 };
 
 // ============================================================================
+// I18N — тексты интерфейса (Phase 23). Русский и английский; набор ключей в
+// словарях обязан совпадать, это закрыто тестом. Наружу торчит только t(key):
+// рендер не знает, какой язык включён, — тот же приём, что и с темой.
+//
+// Язык определяется по браузеру, а на Яндекс Играх — по языку игрока из SDK,
+// пока игрок не выбрал его руками в настройках.
+// ============================================================================
+const I18N = {
+  ru: {
+    hint: 'Ставь стопку рядом с таким же цветом',
+    record: 'Рекорд: ',
+    newRecord: 'Новый рекорд: ',
+    points: 'очков',
+    gameOver: 'Игра окончена',
+    wallet: 'В кошельке монет: ',
+    leaderboard: 'Рейтинг',
+    restart: 'Заново',
+    back: 'Назад',
+    loading: 'Загружаем…',
+    lbUnavailable1: 'Глобальный рейтинг работает',
+    lbUnavailable2: 'в версии для Яндекс Игр',
+    yourRecord: 'Твой рекорд: ',
+    yourPlace: 'Твоё место: ',
+    player: 'Игрок',
+    settings: 'Настройки',
+    sfx: 'Звуки',
+    music: 'Музыка',
+    haptics: 'Вибрация',
+    language: 'Язык',
+    on: 'вкл',
+    off: 'выкл',
+    boostMove: 'Перенос',
+    boostReroll: 'Пересдача',
+    boostRemove: 'Убрать',
+    hintMove: 'Выбери стопку, потом свободную ячейку',
+    hintRemove: 'Выбери стопку, которую убрать'
+  },
+  en: {
+    hint: 'Place a stack next to the same colour',
+    record: 'Best: ',
+    newRecord: 'New best: ',
+    points: 'points',
+    gameOver: 'Game over',
+    wallet: 'Coins in wallet: ',
+    leaderboard: 'Leaderboard',
+    restart: 'Restart',
+    back: 'Back',
+    loading: 'Loading…',
+    lbUnavailable1: 'The global leaderboard works',
+    lbUnavailable2: 'in the Yandex Games version',
+    yourRecord: 'Your best: ',
+    yourPlace: 'Your place: ',
+    player: 'Player',
+    settings: 'Settings',
+    sfx: 'Sound',
+    music: 'Music',
+    haptics: 'Vibration',
+    language: 'Language',
+    on: 'on',
+    off: 'off',
+    boostMove: 'Move',
+    boostReroll: 'Reshuffle',
+    boostRemove: 'Remove',
+    hintMove: 'Pick a stack, then an empty cell',
+    hintRemove: 'Pick a stack to remove'
+  }
+};
+
+// Единственная точка доступа к текстам. Неизвестный ключ возвращается как есть —
+// пустая надпись на экране хуже, чем видимое имя ключа.
+function t(key) {
+  const dict = I18N[CONFIG.lang] || I18N.ru;
+  return dict[key] !== undefined ? dict[key] : key;
+}
+
+// Язык браузера: всё, кроме русского, получает английский
+function detectLang() {
+  try {
+    const lang = (navigator.language || '').toLowerCase();
+    return lang.indexOf('ru') === 0 ? 'ru' : 'en';
+  } catch (e) {
+    return 'ru';
+  }
+}
+
+function setLang(lang) {
+  if (!I18N[lang]) return false;
+  CONFIG.lang = lang;
+  return true;
+}
+
+// ============================================================================
 // themes — визуальный стиль (Phase 12/14). Тема задаёт палитру, цвета интерфейса
 // и три функции отрисовки: фон, пустая ячейка, фишка. Остальной render не знает,
 // какой стиль включён, — он работает через CONFIG.ui и THEME.
@@ -381,12 +524,19 @@ const THEMES = {
       text: '#3B3226', textDim: '#8A7A63',
       highlightFill: '#F6EDD8', highlightStroke: '#8A7A63',
       overlayBg: 'rgba(239, 230, 213, 0.92)', overlayText: '#3B3226',
-      cardFill: '#F6EDD8', cardShadow: 'rgba(90, 72, 48, 0.28)',
+      cardFill: '#F6EDD8', cardShadow: 'rgba(90, 72, 48, 0.16)',
       buttonFill: '#3A7CA5', buttonFillDark: '#2C5F7F', buttonText: '#F7F3E8',
       coinColor: '#E9C46A'
     },
     boostBar: { fill: '#E2D6BF', fillActive: '#F6EDD8',
                 stroke: '#C7B393', strokeActive: '#8A7A63' },
+
+    // Матовая поверхность (Phase 22). Глянец на бумаге читается как пластик,
+    // поэтому тень мягкая и почти без смещения.
+    // Зерно на самих фишках было и убрано по playtest (Phase 23): крупинки
+    // читались как случайные белые точки, а не как фактура. Фактура осталась
+    // там, где работает, — на фоне.
+    matte: { shadow: 'rgba(60, 45, 30, 0.18)', blur: 5, offsetY: 2 },
 
     // фон рисуется один раз и кэшируется: 7000 крупинок каждый кадр — дорого
     background(ctx) {
@@ -424,10 +574,11 @@ const THEMES = {
     },
 
     tile(ctx, x, y, size, color, isTop, seed) {
+      const m = THEMES.paper.matte;
       ctx.save();
-      ctx.shadowColor = 'rgba(60, 45, 30, 0.35)';
-      ctx.shadowBlur = 7;
-      ctx.shadowOffsetY = 3;
+      ctx.shadowColor = m.shadow;
+      ctx.shadowBlur = m.blur;
+      ctx.shadowOffsetY = m.offsetY;
       THEMES.paper.wobbleHex(ctx, x, y, size, seed);
       ctx.fillStyle = isTop ? color : render.shade(color, -0.12);
       ctx.fill();
@@ -472,17 +623,103 @@ const Platform = {
   saveCoins(value) { Platform.save(CONFIG.storage.coinsKey, value); },
   loadCoins() { return Platform.loadNumber(CONFIG.storage.coinsKey); },
 
-  // Смена экономики обесценивает прежний рекорд: в старой шкале сгорание давало
-  // 100 очков, в новой — 10. Один раз сбрасываем рекорд, чтобы планка была честной.
+  // Настройки игрока (Phase 19) — единственное, что хранится объектом, поэтому
+  // JSON, а не loadNumber. Битое или отсутствующее значение не должно ронять игру:
+  // возвращаем null, а значения по умолчанию решает вызывающий (applySettings).
+  saveSettings(values) {
+    Platform.save(CONFIG.storage.settingsKey, JSON.stringify(values));
+  },
+  loadSettings() {
+    try {
+      const raw = localStorage.getItem(CONFIG.storage.settingsKey);
+      const parsed = raw ? JSON.parse(raw) : null;
+      return parsed && typeof parsed === 'object' ? parsed : null;
+    } catch (e) {
+      return null;
+    }
+  },
+
+  // Смена экономики обесценивает прежний прогресс: в первой шкале сгорание
+  // давало 100 очков, во второй — 10, а в третьей изменилась ещё и формула
+  // монет (ADR-0007). Сбрасываем **и рекорд, и кошелёк**: сравнивать их с
+  // новыми числами нельзя, а копившиеся тысячи монет обесценили бы бусты.
   migrateEconomy() {
     const stored = Platform.loadNumber(CONFIG.storage.economyKey);
     if (stored >= CONFIG.storage.economyVersion) return false;
     Platform.saveBest(0);
+    Platform.saveCoins(0);
     Platform.save(CONFIG.storage.economyKey, CONFIG.storage.economyVersion);
     return true;
   },
   showAd() { /* заглушка под SDK Яндекс/CrazyGames (v2) */ },
-  onPause() { /* заглушка под SDK Яндекс/CrazyGames (v2) */ },
+
+  // --- Обязательная разметка для платформы (Phase 20) -----------------------
+  // Всё ниже молча ничего не делает без SDK: локально и на Pages его нет вовсе.
+
+  // «Игра загрузилась, можно играть». Без этого вызова модерация Яндекса игру
+  // не пропускает, а у игрока висит прелоадер платформы поверх готовой игры.
+  gameReady() {
+    try {
+      const features = Platform.sdk && Platform.sdk.features;
+      if (!features || !features.LoadingAPI) return false;
+      features.LoadingAPI.ready();
+      return true;
+    } catch (e) {
+      return false;
+    }
+  },
+
+  // Язык игрока на платформе (Phase 23). Уважаем ручной выбор: если игрок уже
+  // ткнул RU или EN в настройках, платформа его не переопределяет.
+  applyPlatformLang(sdk) {
+    const saved = Platform.loadSettings();
+    if (saved && saved.lang) return false;
+    try {
+      const lang = sdk && sdk.environment && sdk.environment.i18n &&
+        sdk.environment.i18n.lang;
+      if (!lang) return false;
+      const applied = setLang(lang.indexOf('ru') === 0 ? 'ru' : 'en');
+      if (applied) requestRender();
+      return applied;
+    } catch (e) {
+      return false;
+    }
+  },
+
+  // Идёт ли партия прямо сейчас. Платформа требует строгого чередования
+  // start/stop, поэтому повторное событие того же вида не отправляется.
+  // Оверлей конца, экран настроек и рейтинг — это «партия не идёт».
+  gameplayRunning: false,
+  gameplay(running) {
+    if (Platform.gameplayRunning === running) return false;
+    Platform.gameplayRunning = running;
+    try {
+      const features = Platform.sdk && Platform.sdk.features;
+      if (!features || !features.GameplayAPI) return false;
+      if (running) features.GameplayAPI.start();
+      else features.GameplayAPI.stop();
+      return true;
+    } catch (e) {
+      return false;
+    }
+  },
+
+  // Пауза приходит от платформы (реклама, уход со вкладки). Игра пошаговая,
+  // останавливать нечего — но звук замолчать обязан, иначе музыка продолжит
+  // играть поверх рекламы.
+  onPause() {
+    Platform.gameplay(false);
+    Audio.stopMusic();
+    return true;
+  },
+  onResume() {
+    Audio.startMusic();
+    if (!GameState.isGameOver && !GameState.settings &&
+        !(GameState.leaderboard && GameState.leaderboard.open)) {
+      Platform.gameplay(true);
+    }
+    return true;
+  },
 
   // Вибрация (Phase 18). На десктопе гаптики нет, и это не ошибка — просто
   // тихо ничего не делаем, как и с недоступным хранилищем.
@@ -521,6 +758,17 @@ const Platform = {
       YaGames.init()
         .then(sdk => {
           Platform.sdk = sdk;
+          Platform.gameReady();        // обязательный сигнал: игра готова
+          Platform.applyPlatformLang(sdk);
+          // SDK появляется позже первой партии, и флаг к этому моменту уже
+          // поднят — сбрасываем, иначе start() платформе так и не уйдёт
+          Platform.gameplayRunning = false;
+          Platform.gameplay(true);
+          // платформа сама просит паузу — на рекламе и при уходе со вкладки
+          if (sdk.on) {
+            sdk.on('game_api_pause', Platform.onPause);
+            sdk.on('game_api_resume', Platform.onResume);
+          }
           return sdk.getLeaderboards();
         })
         .then(leaderboards => { Platform.leaderboards = leaderboards; })
@@ -558,7 +806,7 @@ const Platform = {
         entries: (result.entries || []).map(entry => ({
           rank: entry.rank,
           score: entry.score,
-          name: (entry.player && entry.player.publicName) || 'Игрок'
+          name: (entry.player && entry.player.publicName) || t('player')
         }))
       }))
       .catch(() => ({ available: false, entries: [] }));
@@ -598,6 +846,11 @@ const Audio = {
       Audio.master = Audio.ctx.createGain();
       Audio.master.gain.value = CONFIG.audio.master;
       Audio.master.connect(Audio.ctx.destination);
+      // Шина эффектов отдельно от музыки (Phase 19): иначе регулятор «Звуки»
+      // приглушал бы и фон, ведь master общий для всего.
+      Audio.sfxOut = Audio.ctx.createGain();
+      Audio.sfxOut.gain.value = CONFIG.audio.volumeSfx;
+      Audio.sfxOut.connect(Audio.master);
       Audio.buildRoom();
       Audio.noise = Audio.makeNoise();
       Audio.startMusic();      // фон заводится тем же первым жестом
@@ -624,6 +877,9 @@ const Audio = {
     Audio.sfxSend = ctx.createGain();
     Audio.sfxSend.gain.value = CONFIG.audio.roomSend;
     Audio.sfxSend.connect(Audio.room);
+    // отражения эффектов идут после их регулятора: выключенные звуки не должны
+    // оставлять после себя реверб
+    Audio.sfxOut.connect(Audio.sfxSend);
   },
 
   // Импульс комнаты — затухающий шум в двух каналах. Каналы разные, иначе
@@ -658,10 +914,34 @@ const Audio = {
     return buffer;
   },
 
-  // Задел под экран настроек (Phase 19): громкость меняется на живом контексте
+  // Общая громкость игры. Экран настроек её не трогает: игроку даны раздельные
+  // регуляторы эффектов и музыки, а master остаётся калибровкой.
   setMaster(value) {
     CONFIG.audio.master = value;
     if (Audio.master) Audio.master.gain.value = value;
+  },
+
+  // Регуляторы экрана настроек (Phase 19). Это множители 0…1 поверх калибровки,
+  // поэтому 1 звучит ровно так, как было до фазы. Меняются на живом контексте:
+  // игрок должен слышать результат, не дожидаясь следующего звука.
+  setSfxVolume(value) {
+    CONFIG.audio.volumeSfx = value;
+    if (Audio.sfxOut) Audio.sfxOut.gain.value = value;
+    return CONFIG.audio.volumeSfx;
+  },
+
+  // У музыки регулятор ещё и выключатель: на нуле планировщик незачем крутить
+  // впустую, а при возврате громкости он заводится снова.
+  setMusicVolume(value) {
+    const m = CONFIG.audio.music;
+    m.volume = value;
+    if (Audio.music.out) Audio.music.out.gain.value = m.gain * m.volume;
+    if (!value) {
+      Audio.stopMusic();
+    } else if (!Audio.music.timer) {
+      Audio.startMusic();
+    }
+    return m.volume;
   },
 
   // --- Примитивы синтеза ----------------------------------------------------
@@ -676,10 +956,16 @@ const Audio = {
     return CONFIG.audio.master * (Audio.voice(name).gain || 0);
   },
 
+  // Регулятор «Звуки» на нуле — узлы не строим вовсе: они всё равно прозвучали
+  // бы в тишину, а на слабом телефоне это лишняя работа на каждое событие.
+  sfxOn() {
+    return CONFIG.audio.volumeSfx > 0;
+  },
+
   // Одинаковый звук не чаще, чем раз в minGapMs: за один waveCommit может
   // сгореть несколько ячеек, а три одинаковых «тука» в один сэмпл дают щелчок.
   ready(name) {
-    if (!Audio.ctx || !Audio.gainFor(name)) return false;
+    if (!Audio.ctx || !Audio.sfxOn() || !Audio.gainFor(name)) return false;
     const now = Audio.ctx.currentTime * 1000;
     const last = Audio.lastAt[name];
     if (last !== undefined && now - last < CONFIG.audio.minGapMs) return false;
@@ -694,7 +980,7 @@ const Audio = {
   tone(name, freq, opts) {
     const o = opts || {};
     const gain = Audio.gainFor(name) * (o.mul || 1);
-    if (!Audio.ctx || !gain) return false;
+    if (!Audio.ctx || !gain || !Audio.sfxOn()) return false;
     const ctx = Audio.ctx;
     const at = ctx.currentTime + (o.delay || 0);
     const dur = o.decay || CONFIG.audio.woodDecay;
@@ -707,8 +993,7 @@ const Audio = {
     env.gain.setValueAtTime(gain, at);
     env.gain.exponentialRampToValueAtTime(gain * 0.001, at + dur);
     osc.connect(env);
-    env.connect(Audio.master);
-    if (Audio.sfxSend) env.connect(Audio.sfxSend);   // доля в общую комнату
+    env.connect(Audio.sfxOut);      // регулятор «Звуки», а за ним доля в комнату
     osc.start(at);
     osc.stop(at + dur);
     return true;
@@ -718,7 +1003,7 @@ const Audio = {
   rustle(name, opts) {
     const o = opts || {};
     const gain = Audio.gainFor(name) * (o.mul || 1);
-    if (!Audio.ctx || !gain) return false;
+    if (!Audio.ctx || !gain || !Audio.sfxOn()) return false;
     const a = CONFIG.audio;
     const ctx = Audio.ctx;
     const at = ctx.currentTime + (o.delay || 0);
@@ -733,12 +1018,19 @@ const Audio = {
     // полоса едет вниз: у бумаги призвук темнеет к концу движения
     filter.frequency.setValueAtTime(band * 1.4, at);
     filter.frequency.exponentialRampToValueAtTime(band, at + dur);
-    env.gain.setValueAtTime(gain, at);
+    // attack есть не у всех голосов: ноль означает прежнее поведение — сразу на
+    // пик. Ненулевая атака превращает щелчок во вздох (тот же приём, что у
+    // шейкера в музыке).
+    if (o.attack) {
+      env.gain.setValueAtTime(gain * 0.001, at);
+      env.gain.exponentialRampToValueAtTime(gain, at + o.attack);
+    } else {
+      env.gain.setValueAtTime(gain, at);
+    }
     env.gain.exponentialRampToValueAtTime(gain * 0.001, at + dur);
     src.connect(filter);
     filter.connect(env);
-    env.connect(Audio.master);
-    if (Audio.sfxSend) env.connect(Audio.sfxSend);   // доля в общую комнату
+    env.connect(Audio.sfxOut);      // регулятор «Звуки», а за ним доля в комнату
     src.start(at);
     src.stop(at + dur);
     return true;
@@ -873,17 +1165,21 @@ const Audio = {
   // немедленно, и петля, перезаводящая саму себя, ушла бы в бесконечную
   // рекурсию. Здесь тик просто не вызывают, и всё стоит.
 
-  room: null, roomMix: null, sfxSend: null,
+  room: null, roomMix: null, sfxSend: null, sfxOut: null,
   music: { timer: null, nextAt: 0, step: 0, tension: 0, out: null },
 
   startMusic() {
     const m = CONFIG.audio.music;
-    if (!Audio.ctx || Audio.music.timer || !m.gain) return false;
+    if (!Audio.ctx || Audio.music.timer || !m.gain || !m.volume) return false;
     const ctx = Audio.ctx;
-    Audio.music.out = ctx.createGain();
-    Audio.music.out.gain.value = m.gain;
-    Audio.music.out.connect(Audio.master);
-    if (Audio.room) Audio.music.out.connect(Audio.room);   // музыка в комнате целиком
+    // Узел переживает выключение музыки: игрок может вернуть громкость, и второй
+    // выход к тому же master дал бы лишний узел на каждое переключение.
+    if (!Audio.music.out) {
+      Audio.music.out = ctx.createGain();
+      Audio.music.out.connect(Audio.master);
+      if (Audio.room) Audio.music.out.connect(Audio.room);  // музыка в комнате целиком
+    }
+    Audio.music.out.gain.value = m.gain * m.volume;
     Audio.music.nextAt = ctx.currentTime;
     Audio.music.step = 0;
     Audio.music.timer = setInterval(Audio.pumpMusic, m.lookaheadMs);
@@ -1425,6 +1721,14 @@ const mergeEngine = {
     return base * s.pointsPerTileBase + over * s.pointsPerTileOver;
   },
 
+  // Монеты за сгоревший блок: платят только фишки сверх coinsFreeTiles
+  // (ADR-0007). Блок ровно в порог — ноль монет, и это намеренно: иначе доход
+  // идёт за сам факт игры, а не за то, что игрок собрал блок крупнее нужного.
+  burnCoinsFor(tiles) {
+    const s = CONFIG.scoring;
+    return Math.max(0, tiles - s.coinsFreeTiles) * s.coinsPerBurnedTile;
+  },
+
   // Сгорание: верхний блок дорос до порога — горит целиком (13 → горят 13)
   burnIfReady(state, cell, waveNumber) {
     if (!cell.stack) return { burned: false };
@@ -1436,7 +1740,7 @@ const mergeEngine = {
       burned: true, cell, color: run.color, count: run.length,
       wave: waveNumber,                                  // нужен анимации, не очкам
       points: mergeEngine.burnPointsFor(run.length),
-      coins: run.length * CONFIG.scoring.coinsPerBurnedTile
+      coins: mergeEngine.burnCoinsFor(run.length)
     };
   },
 
@@ -1812,17 +2116,23 @@ const render = {
     ctx.textAlign = 'right';
     ctx.fillStyle = ui.textDim;
     ctx.font = '20px system-ui, sans-serif';
-    ctx.fillText('Рекорд: ' + state.best, CONFIG.canvas.width - 24, ui.bestY);
+    // строка кончается левее шестерёнки настроек, поэтому край задан числом
+    const bestText = t('record') + state.best;
+    ctx.fillText(bestText, ui.bestX, ui.bestY);
+    // кубок слева от строки: её ширина зависит от величины рекорда
+    render.trophyIcon(ui.bestX - render.textWidth(bestText, 10) - ui.trophyGap,
+      ui.bestY, ui.trophySize);
 
     render.drawCoins(state);
 
     // активный буст объясняет, что выбирать; иначе стартовая подсказка
-    const boostHint = state.boost ? input.boostConfig(state.boost.kind).hint : null;
+    const boostHintKey = state.boost ? input.boostConfig(state.boost.kind).hint : null;
+    const boostHint = boostHintKey ? t(boostHintKey) : null;
     if (boostHint || state.showHint) {
       ctx.textAlign = 'center';
       ctx.fillStyle = boostHint ? ui.text : ui.textDim;
       ctx.font = '20px system-ui, sans-serif';
-      ctx.fillText(boostHint || ui.hintText, CONFIG.canvas.width / 2, ui.hintY);
+      ctx.fillText(boostHint || t('hint'), CONFIG.canvas.width / 2, ui.hintY);
     }
   },
 
@@ -1893,22 +2203,108 @@ const render = {
       state.camera.rotation);
   },
 
+  // --- Значки: векторные пути (Phase 22, переписаны на Path2D в Phase 23) ----
+  // Отдельных SVG-файлов быть не может (ADR-0001: один файл, работает офлайн),
+  // но язык путей SVG доступен и без файлов: Path2D принимает ту же строку «M…»,
+  // что и атрибут d. Системные эмодзи отвергнуты: они разные на каждой ОС и
+  // глянцевые поверх матовой бумаги.
+  //
+  // Все пути нарисованы в квадрате 24×24 — как принято в любом наборе иконок.
+  // Метафоры выбраны узнаваемые: подписи с кнопок бустов убраны, и значок
+  // должен объяснять действие сам.
+  iconPaths: {
+    coin: { fill: 'M12 3a9 9 0 1 1 0 18 9 9 0 0 1 0-18z',
+            stroke: 'M12 7.6a4.4 4.4 0 1 0 0 8.8 4.4 4.4 0 0 0 0-8.8z',
+            lineWidth: 1.4 },
+    trophy: { fill: 'M7 4h10v4.5a5 5 0 0 1-10 0zM11 13.5h2V17h-2zM8 18h8v2.2H8z',
+              stroke: 'M7 5.4H4.6v1.8a3.2 3.2 0 0 0 2.8 3.2M17 5.4h2.4v1.8a3.2 3.2 0 0 1-2.8 3.2',
+              lineWidth: 1.6 },
+    // перенос: гекс уезжает вправо
+    move: { fill: 'M9.6 12l-1.8 3.1H4.2L2.4 12l1.8-3.1h3.6z',
+            stroke: 'M12.4 12h7.2M16.8 8.8L20 12l-3.2 3.2',
+            lineWidth: 2 },
+    // пересдача: круговая стрелка — общепринятый «обновить»
+    reroll: { stroke: 'M19.5 12a7.5 7.5 0 1 1-2.2-5.3M19.8 4.4v3.6h-3.6',
+              lineWidth: 2.2 },
+    // убрать: корзина
+    remove: { stroke: 'M4.6 6.8h14.8M9.8 6.8V4.6h4.4v2.2M6.4 6.8l1 12.6h9.2l1-12.6M10.2 10.4v6M13.8 10.4v6',
+              lineWidth: 2 }
+  },
+
+  // Path2D строится один раз на путь: кнопок три, а кадров шестьдесят в секунду.
+  // Кэш той же природы, что backgroundCache и gradientCache.
+  iconCache: new Map(),
+  iconPath(d) {
+    let path = render.iconCache.get(d);
+    if (!path) {
+      path = new Path2D(d);
+      render.iconCache.set(d, path);
+    }
+    return path;
+  },
+
+  // Нарисовать значок с центром в (x, y). Цвета приходят снаружи, поэтому
+  // значки меняются вместе с темой.
+  drawIcon(name, x, y, size, fill, stroke) {
+    const icon = render.iconPaths[name];
+    if (!icon || typeof Path2D === 'undefined') return false;
+    const ctx = render.ctx;
+    const k = size / 24;
+    ctx.save();
+    ctx.translate(x - size / 2, y - size / 2);
+    ctx.scale(k, k);
+    ctx.lineWidth = icon.lineWidth || 2;
+    ctx.lineJoin = 'round';
+    ctx.lineCap = 'round';
+    if (icon.fill) {
+      ctx.fillStyle = fill;
+      ctx.fill(render.iconPath(icon.fill));
+    }
+    if (icon.stroke) {
+      ctx.strokeStyle = stroke || fill;
+      ctx.stroke(render.iconPath(icon.stroke));
+    }
+    ctx.restore();
+    return true;
+  },
+
+  // Монета: тень остаётся мягкой — та же матовость, что и у фишек
+  coinIcon(x, y, r) {
+    const ctx = render.ctx;
+    const ui = CONFIG.ui;
+    ctx.save();
+    ctx.shadowColor = ui.cardShadow;
+    ctx.shadowBlur = 4;
+    ctx.shadowOffsetY = 2;
+    render.drawIcon('coin', x, y, r * 2.4, ui.coinColor,
+      render.shade(ui.coinColor, -0.32));
+    ctx.restore();
+  },
+
+  trophyIcon(x, y, size) {
+    render.drawIcon('trophy', x, y, size, CONFIG.ui.coinColor,
+      render.shade(CONFIG.ui.coinColor, -0.3));
+  },
+
+  boostIcon(kind, x, y, size) {
+    render.drawIcon(kind, x, y, size, CONFIG.ui.text, CONFIG.ui.text);
+  },
+
+  // Ширина строки: measureText есть не во всяком контексте (в тестах канвас —
+  // заглушка), поэтому на этот случай считаем по средней ширине символа.
+  textWidth(text, perChar) {
+    const ctx = render.ctx;
+    const measured = ctx.measureText ? ctx.measureText(text) : null;
+    return measured && measured.width ? measured.width : text.length * perChar;
+  },
+
   // Кошелёк: монетка и число слева сверху
   drawCoins(state) {
     const ctx = render.ctx;
     const ui = CONFIG.ui;
     const cx = ui.coinsX + ui.coinRadius;
 
-    // монета — вырезанный кружок: тень вместо обводки
-    ctx.save();
-    ctx.shadowColor = ui.cardShadow;
-    ctx.shadowBlur = 5;
-    ctx.shadowOffsetY = 3;
-    ctx.beginPath();
-    ctx.arc(cx, ui.coinsY, ui.coinRadius, 0, Math.PI * 2);
-    ctx.fillStyle = ui.coinColor;
-    ctx.fill();
-    ctx.restore();
+    render.coinIcon(cx, ui.coinsY, ui.coinRadius);
 
     ctx.textAlign = 'left';
     ctx.textBaseline = 'middle';
@@ -1952,21 +2348,21 @@ const render = {
     ctx.textBaseline = 'middle';
     ctx.fillStyle = ui.overlayText;
     ctx.font = 'bold 34px system-ui, sans-serif';
-    ctx.fillText('Рейтинг', W / 2, 120);
+    ctx.fillText(t('leaderboard'), W / 2, 120);
 
     if (board.loading) {
       ctx.font = '20px system-ui, sans-serif';
       ctx.fillStyle = ui.textDim;
-      ctx.fillText('Загружаем…', W / 2, H / 2);
+      ctx.fillText(t('loading'), W / 2, H / 2);
     } else if (!board.available) {
       // локальная версия: сети нет и быть не должно (ADR-0005)
       ctx.font = '20px system-ui, sans-serif';
       ctx.fillStyle = ui.textDim;
-      ctx.fillText('Глобальный рейтинг работает', W / 2, H / 2 - 40);
-      ctx.fillText('в версии для Яндекс Игр', W / 2, H / 2 - 12);
+      ctx.fillText(t('lbUnavailable1'), W / 2, H / 2 - 40);
+      ctx.fillText(t('lbUnavailable2'), W / 2, H / 2 - 12);
       ctx.fillStyle = ui.overlayText;
       ctx.font = 'bold 30px system-ui, sans-serif';
-      ctx.fillText('Твой рекорд: ' + state.best, W / 2, H / 2 + 34);
+      ctx.fillText(t('yourRecord') + state.best, W / 2, H / 2 + 34);
     } else {
       ctx.font = '20px system-ui, sans-serif';
       board.entries.forEach((entry, i) => {
@@ -1983,7 +2379,7 @@ const render = {
         ctx.textAlign = 'center';
         ctx.fillStyle = ui.buttonFill;
         ctx.font = '22px system-ui, sans-serif';
-        ctx.fillText('Твоё место: ' + board.playerRank, W / 2,
+        ctx.fillText(t('yourPlace') + board.playerRank, W / 2,
           190 + board.entries.length * 36 + 28);
       }
     }
@@ -1993,7 +2389,7 @@ const render = {
     ctx.textAlign = 'center';
     ctx.fillStyle = ui.buttonText;
     ctx.font = 'bold 24px system-ui, sans-serif';
-    ctx.fillText('Назад', back.x + back.w / 2, back.y + back.h / 2 + 1);
+    ctx.fillText(t('back'), back.x + back.w / 2, back.y + back.h / 2 + 1);
     ctx.globalAlpha = 1;
   },
 
@@ -2002,9 +2398,11 @@ const render = {
   paperCard(x, y, w, h, r, fill, stroke) {
     const ctx = render.ctx;
     ctx.save();
+    // тень мягкая и почти без смещения: матовая бумага лежит на столе,
+    // а не парит над ним (Phase 22)
     ctx.shadowColor = CONFIG.ui.cardShadow;
-    ctx.shadowBlur = 12;
-    ctx.shadowOffsetY = 6;
+    ctx.shadowBlur = 9;
+    ctx.shadowOffsetY = 4;
     render.roundRectPath(x, y, w, h, r);
     ctx.fillStyle = fill;
     ctx.fill();
@@ -2044,23 +2442,23 @@ const render = {
     ctx.textBaseline = 'middle';
     ctx.fillStyle = ui.overlayText;
     ctx.font = 'bold 46px system-ui, sans-serif';
-    ctx.fillText('Игра окончена', W / 2, H / 2 - 120);
+    ctx.fillText(t('gameOver'), W / 2, H / 2 - 120);
 
     ctx.font = 'bold 64px system-ui, sans-serif';
     ctx.fillText(String(state.score), W / 2, H / 2 - 55);
     ctx.font = '22px system-ui, sans-serif';
     ctx.fillStyle = ui.textDim;
-    ctx.fillText('очков', W / 2, H / 2 - 12);
+    ctx.fillText(t('points'), W / 2, H / 2 - 12);
 
     // новый рекорд отмечаем явно — это единственная мета-прогрессия в игре
     const isRecord = state.score >= state.best && state.score > 0;
     ctx.font = '24px system-ui, sans-serif';
     ctx.fillStyle = isRecord ? ui.overlayText : ui.textDim;
-    ctx.fillText((isRecord ? 'Новый рекорд: ' : 'Рекорд: ') + state.best, W / 2, H / 2 + 26);
+    ctx.fillText(t(isRecord ? 'newRecord' : 'record') + state.best, W / 2, H / 2 + 26);
 
     ctx.font = '20px system-ui, sans-serif';
     ctx.fillStyle = ui.textDim;
-    ctx.fillText('В кошельке монет: ' + state.coins, W / 2, H / 2 + 58);
+    ctx.fillText(t('wallet') + state.coins, W / 2, H / 2 + 58);
 
     const rating = render.leaderboardButtonRect();
     render.roundRectPath(rating.x, rating.y, rating.w, rating.h, ui.buttonRadius);
@@ -2069,13 +2467,13 @@ const render = {
     ctx.stroke();
     ctx.fillStyle = ui.overlayText;
     ctx.font = '20px system-ui, sans-serif';
-    ctx.fillText('Рейтинг', rating.x + rating.w / 2, rating.y + rating.h / 2 + 1);
+    ctx.fillText(t('leaderboard'), rating.x + rating.w / 2, rating.y + rating.h / 2 + 1);
 
     const btn = render.restartButtonRect();
     render.paperCard(btn.x, btn.y, btn.w, btn.h, ui.buttonRadius, ui.buttonFill);
     ctx.fillStyle = ui.buttonText;
     ctx.font = 'bold 26px system-ui, sans-serif';
-    ctx.fillText('Заново', btn.x + btn.w / 2, btn.y + btn.h / 2 + 1);
+    ctx.fillText(t('restart'), btn.x + btn.w / 2, btn.y + btn.h / 2 + 1);
     ctx.globalAlpha = 1;
   },
 
@@ -2103,22 +2501,19 @@ const render = {
         active ? bar.fillActive : bar.fill, active ? bar.strokeActive : null);
 
       ctx.globalAlpha = affordable ? 1 : 0.4;
+      // значок крупно по центру: три буста различаются с одного взгляда
+      render.boostIcon(boost.kind, rect.x + rect.w / 2, rect.y + bar.iconY, bar.iconSize);
+
+      // цена с монеткой под значком, вся группа по центру кнопки
       ctx.textAlign = 'left';
       ctx.textBaseline = 'middle';
-      ctx.fillStyle = CONFIG.ui.text;
-      ctx.font = 'bold 18px system-ui, sans-serif';
-      ctx.fillText(boost.label, rect.x + 16, rect.y + rect.h / 2);
-
-      // цена с монеткой у правого края кнопки
-      const coinX = rect.x + rect.w - 20;
-      ctx.beginPath();
-      ctx.arc(coinX, rect.y + rect.h / 2, 7, 0, Math.PI * 2);
-      ctx.fillStyle = CONFIG.ui.coinColor;
-      ctx.fill();
-      ctx.textAlign = 'right';
-      ctx.fillStyle = affordable ? CONFIG.ui.text : CONFIG.ui.textDim;
       ctx.font = '17px system-ui, sans-serif';
-      ctx.fillText(String(boost.cost), coinX - 12, rect.y + rect.h / 2);
+      const priceText = String(boost.cost);
+      const priceW = render.textWidth(priceText, 9);
+      const groupX = rect.x + rect.w / 2 - (priceW + 20) / 2;
+      render.coinIcon(groupX + 7, rect.y + bar.priceY, 7);
+      ctx.fillStyle = affordable ? CONFIG.ui.text : CONFIG.ui.textDim;
+      ctx.fillText(priceText, groupX + 20, rect.y + bar.priceY);
       ctx.globalAlpha = 1;
     });
   },
@@ -2165,6 +2560,218 @@ const render = {
     render.hexPath(b.x + b.w / 2, b.y + b.h / 2, b.w * 0.26);
     ctx.fillStyle = CONFIG.ui.text;
     ctx.fill();
+  },
+
+  // --- Экран настроек (Phase 19) --------------------------------------------
+  // Своих цветов у экрана нет: всё из палитры темы, иначе стиль пришлось бы
+  // поддерживать в двух местах. Геометрия — в CONFIG.ui.settings.
+
+  // Кнопка-шестерёнка в правом верхнем углу. Строка рекорда заканчивается левее
+  // (CONFIG.ui.bestX), поэтому они не наезжают друг на друга.
+  settingsButtonRect() {
+    const c = CONFIG.ui.settings.button;
+    return {
+      x: CONFIG.canvas.width - c.size - c.margin,
+      y: c.top,
+      w: c.size,
+      h: c.size
+    };
+  },
+
+  // Значок: гекс с вырезанной серединой — та же геометрия, что у всей игры,
+  // и рисуется двумя операциями вместо зубцов настоящей шестерёнки
+  drawSettingsButton(state) {
+    const ctx = render.ctx;
+    const b = render.settingsButtonRect();
+    const cx = b.x + b.w / 2;
+    const cy = b.y + b.h / 2;
+    render.paperCard(b.x, b.y, b.w, b.h, 10, CONFIG.ui.cardFill);
+    render.hexPath(cx, cy, b.w * 0.30);
+    ctx.fillStyle = CONFIG.ui.text;
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(cx, cy, b.w * 0.12, 0, Math.PI * 2);
+    ctx.fillStyle = CONFIG.ui.cardFill;
+    ctx.fill();
+  },
+
+  // Дорожка ползунка: 0 — звуки, 1 — музыка
+  settingsSliderRect(index) {
+    const cfg = CONFIG.ui.settings;
+    return {
+      x: cfg.sliderX,
+      y: cfg.rowY[index] - cfg.sliderH / 2,
+      w: cfg.sliderW,
+      h: cfg.sliderH
+    };
+  },
+
+  // Зона попадания заметно шире самой дорожки: пальцем в полоску 10 px не попасть
+  settingsSliderHitRect(index) {
+    const cfg = CONFIG.ui.settings;
+    const rect = render.settingsSliderRect(index);
+    return {
+      x: rect.x - cfg.knob,
+      y: rect.y - cfg.knob * 2,
+      w: rect.w + cfg.knob * 2,
+      h: rect.h + cfg.knob * 4
+    };
+  },
+
+  settingsToggleRect() {
+    const cfg = CONFIG.ui.settings;
+    return {
+      x: cfg.sliderX,
+      y: cfg.rowY[2] - cfg.toggleH / 2,
+      w: cfg.toggleW,
+      h: cfg.toggleH
+    };
+  },
+
+  // Текущее значение регулятора. Регуляторы правят CONFIG напрямую — своего
+  // состояния у экрана нет, и рассинхрону взяться неоткуда.
+  settingsValue(index) {
+    return index === 0 ? CONFIG.audio.volumeSfx : CONFIG.audio.music.volume;
+  },
+
+  // Экранный X → значение 0…1. Шаг делает попадание предсказуемым и убирает
+  // дробный мусор из хранилища.
+  settingsValueAt(index, x) {
+    const cfg = CONFIG.ui.settings;
+    const rect = render.settingsSliderRect(index);
+    const raw = (x - rect.x) / rect.w;
+    const stepped = Math.round(raw / cfg.step) * cfg.step;
+    return Math.min(1, Math.max(0, Math.round(stepped * 100) / 100));
+  },
+
+  drawSlider(index) {
+    const ctx = render.ctx;
+    const ui = CONFIG.ui;
+    const cfg = ui.settings;
+    const rect = render.settingsSliderRect(index);
+    const value = render.settingsValue(index);
+    const radius = rect.h / 2;
+
+    render.roundRectPath(rect.x, rect.y, rect.w, rect.h, radius);
+    ctx.fillStyle = ui.cellFill;
+    ctx.fill();
+    if (value > 0) {
+      render.roundRectPath(rect.x, rect.y, Math.max(rect.h, rect.w * value), rect.h, radius);
+      ctx.fillStyle = ui.buttonFill;
+      ctx.fill();
+    }
+
+    // ручка — вырезанный кружок с тенью, тем же приёмом, что и монета в HUD
+    ctx.save();
+    ctx.shadowColor = ui.cardShadow;
+    ctx.shadowBlur = 6;
+    ctx.shadowOffsetY = 3;
+    ctx.beginPath();
+    ctx.arc(rect.x + rect.w * value, rect.y + radius, cfg.knob, 0, Math.PI * 2);
+    ctx.fillStyle = ui.cardFill;
+    ctx.fill();
+    ctx.restore();
+
+    ctx.textAlign = 'left';
+    ctx.fillStyle = ui.textDim;
+    ctx.font = '20px system-ui, sans-serif';
+    ctx.fillText(Math.round(value * 100) + ' %', rect.x + rect.w + cfg.knob + 10,
+      rect.y + radius);
+  },
+
+  drawToggle() {
+    const ctx = render.ctx;
+    const ui = CONFIG.ui;
+    const cfg = ui.settings;
+    const rect = render.settingsToggleRect();
+    const on = CONFIG.haptics.enabled;
+
+    render.roundRectPath(rect.x, rect.y, rect.w, rect.h, cfg.toggleRadius);
+    ctx.fillStyle = on ? ui.buttonFill : ui.cellFill;
+    ctx.fill();
+
+    ctx.save();
+    ctx.shadowColor = ui.cardShadow;
+    ctx.shadowBlur = 6;
+    ctx.shadowOffsetY = 3;
+    ctx.beginPath();
+    const knobX = on ? rect.x + rect.w - rect.h / 2 : rect.x + rect.h / 2;
+    ctx.arc(knobX, rect.y + rect.h / 2, cfg.toggleKnob, 0, Math.PI * 2);
+    ctx.fillStyle = ui.cardFill;
+    ctx.fill();
+    ctx.restore();
+
+    ctx.textAlign = 'left';
+    ctx.fillStyle = ui.textDim;
+    ctx.font = '20px system-ui, sans-serif';
+    ctx.fillText(t(on ? 'on' : 'off'), rect.x + rect.w + cfg.knob + 10, rect.y + rect.h / 2);
+  },
+
+  // Кнопки выбора языка (Phase 23). Подписи — сами коды языков, они не
+  // переводятся: «RU» и «EN» понятны на любом языке.
+  langButtonRect(index) {
+    const cfg = CONFIG.ui.settings;
+    return {
+      x: cfg.sliderX + index * (cfg.langW + cfg.langGap),
+      y: cfg.rowY[3] - cfg.langH / 2,
+      w: cfg.langW,
+      h: cfg.langH
+    };
+  },
+
+  drawLangButtons() {
+    const ctx = render.ctx;
+    const ui = CONFIG.ui;
+    Object.keys(I18N).forEach((lang, i) => {
+      const rect = render.langButtonRect(i);
+      const active = CONFIG.lang === lang;
+      render.paperCard(rect.x, rect.y, rect.w, rect.h, ui.settings.langRadius,
+        active ? ui.buttonFill : ui.cellFill);
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillStyle = active ? ui.buttonText : ui.textDim;
+      ctx.font = 'bold 18px system-ui, sans-serif';
+      ctx.fillText(lang.toUpperCase(), rect.x + rect.w / 2, rect.y + rect.h / 2 + 1);
+    });
+  },
+
+  // Экран целиком: проявляется, как оверлей конца и экран рейтинга
+  drawSettings(state) {
+    const settings = state.settings;
+    if (!settings || !settings.open) return;
+    const ctx = render.ctx;
+    const ui = CONFIG.ui;
+    const cfg = ui.settings;
+    const W = CONFIG.canvas.width;
+
+    ctx.globalAlpha = settings.t === undefined ? 1 : settings.t;
+    ctx.fillStyle = ui.overlayBg;
+    ctx.fillRect(0, 0, W, CONFIG.canvas.height);
+
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = ui.overlayText;
+    ctx.font = 'bold 34px system-ui, sans-serif';
+    ctx.fillText(t('settings'), W / 2, cfg.titleY);
+
+    ['sfx', 'music', 'haptics', 'language'].forEach((key, i) => {
+      ctx.textAlign = 'left';
+      ctx.fillStyle = ui.text;
+      ctx.font = '24px system-ui, sans-serif';
+      ctx.fillText(t(key), cfg.labelX, cfg.rowY[i]);
+    });
+    render.drawSlider(0);
+    render.drawSlider(1);
+    render.drawToggle();
+    render.drawLangButtons();
+
+    const back = render.restartButtonRect();
+    render.paperCard(back.x, back.y, back.w, back.h, ui.buttonRadius, ui.buttonFill);
+    ctx.textAlign = 'center';
+    ctx.fillStyle = ui.buttonText;
+    ctx.font = 'bold 24px system-ui, sans-serif';
+    ctx.fillText(t('back'), back.x + back.w / 2, back.y + back.h / 2 + 1);
+    ctx.globalAlpha = 1;
   },
 
   // Поворот мира вокруг центра поля — общая трансформация для всех мировых слоёв
@@ -2244,8 +2851,10 @@ const render = {
     render.drawHUD(state);
     render.drawBoostBar(state);
     render.drawResetCameraButton(state);
+    render.drawSettingsButton(state);
     if (state.isGameOver) render.drawGameOver(state);
     render.drawLeaderboard(state);
+    render.drawSettings(state);      // настройки лежат поверх всего
   }
 };
 
@@ -2340,6 +2949,50 @@ const input = {
 
   // Текущий жест вращения поля
   spin: null,
+
+  // --- Экран настроек (Phase 19) --------------------------------------------
+
+  // Регулятор правит CONFIG через Audio: игрок должен слышать результат сразу,
+  // ещё не отпустив ползунок.
+  setSettingsValue(index, value) {
+    if (index === 0) return Audio.setSfxVolume(value);
+    return Audio.setMusicVolume(value);
+  },
+
+  // Нажатие при открытом экране: ползунки → тумблер → «Назад». Больше на экране
+  // ничего нет, поэтому всё остальное просто игнорируется.
+  settingsDown(state, point) {
+    for (let i = 0; i < 2; i++) {
+      if (input.hitRect(render.settingsSliderHitRect(i), point.x, point.y)) {
+        state.settings.drag = i;
+        input.setSettingsValue(i, render.settingsValueAt(i, point.x));
+        requestRender();
+        return true;
+      }
+    }
+    const langs = Object.keys(I18N);
+    for (let i = 0; i < langs.length; i++) {
+      if (input.hitRect(render.langButtonRect(i), point.x, point.y)) {
+        setLang(langs[i]);
+        persistSettings();     // выбранный руками язык важнее языка браузера
+        requestRender();
+        return true;
+      }
+    }
+    if (input.hitRect(render.settingsToggleRect(), point.x, point.y)) {
+      CONFIG.haptics.enabled = !CONFIG.haptics.enabled;
+      // включили — сразу коротко отдаём: иначе на десктопе не понять, работает ли
+      if (CONFIG.haptics.enabled) Platform.vibrate(CONFIG.haptics.burn);
+      persistSettings();
+      requestRender();
+      return true;
+    }
+    if (input.hitRect(render.restartButtonRect(), point.x, point.y)) {
+      closeSettings(state);
+      return true;
+    }
+    return false;
+  },
 
   // --- Бусты ---------------------------------------------------------------
 
@@ -2473,12 +3126,25 @@ const input = {
       // Здесь проходит любое касание канваса, все ранние return идут ниже.
       Audio.unlock();
 
+      // экран настроек лежит поверх всего и забирает ввод целиком
+      if (state.settings && state.settings.open) {
+        input.settingsDown(state, point);
+        return;
+      }
+
       // экран рейтинга поверх всего: реагирует только кнопка «Назад»
       if (state.leaderboard && state.leaderboard.open) {
         if (input.hitRect(render.restartButtonRect(), point.x, point.y)) {
           state.leaderboard.open = false;
+          Platform.gameplay(!state.isGameOver);
           requestRender();
         }
+        return;
+      }
+      // шестерёнка работает и в партии, и на оверлее конца: убрать музыку
+      // захочется в обоих случаях
+      if (input.hitRect(render.settingsButtonRect(), point.x, point.y)) {
+        openSettings(state);
         return;
       }
       if (state.isGameOver) {
@@ -2545,6 +3211,15 @@ const input = {
     canvas.addEventListener('pointermove', (event) => {
       const point = input.toCanvasCoords(canvas, event);
 
+      // ползунок настроек ведут пальцем: индекс 0 — тоже жест, поэтому сравнение
+      // именно с null, а не проверка на истинность
+      const settings = state.settings;
+      if (settings && settings.open && settings.drag !== null) {
+        input.setSettingsValue(settings.drag, render.settingsValueAt(settings.drag, point.x));
+        requestRender();
+        return;
+      }
+
       const d = state.drag;
       if (d && d.pointerId === event.pointerId) {
         const world = input.screenToWorld(state, point.x, point.y);
@@ -2588,6 +3263,13 @@ const input = {
 
     // Отпускание: положить стопку либо довернуть поле до ближайшей грани
     canvas.addEventListener('pointerup', (event) => {
+      // в хранилище ходим один раз на жест, а не на каждое движение пальца
+      if (state.settings && state.settings.drag !== null) {
+        state.settings.drag = null;
+        persistSettings();
+        return;
+      }
+
       const d = state.drag;
       if (d && d.pointerId === event.pointerId) {
         const cell = input.freeCellAt(state, d.x, d.y);
@@ -2613,6 +3295,13 @@ const input = {
 
     // Прерванный ввод (системный жест, уход фокуса) — считаем отменой
     canvas.addEventListener('pointercancel', (event) => {
+      // системный жест поверх ползунка: значение остаётся, но сохраняем его
+      // тем же путём, что и при обычном отпускании
+      if (state.settings && state.settings.drag !== null) {
+        state.settings.drag = null;
+        persistSettings();
+        return;
+      }
       if (input.spin && input.spin.pointerId === event.pointerId) {
         const spun = input.spin.moved;
         input.spin = null;
@@ -2627,9 +3316,14 @@ const input = {
       requestRender();
     });
 
-    // Клавиатура: R — заново, Esc — отменить активный буст
+    // Клавиатура: R — заново, Esc — закрыть настройки или отменить активный буст
     window.addEventListener('keydown', (event) => {
       Audio.unlock();   // клавиатура — отдельный вход, канваса игрок мог и не касаться
+      // настройки лежат поверх всего, поэтому и Esc достаётся сначала им
+      if (event.code === 'Escape' && state.settings && state.settings.open) {
+        closeSettings(state);
+        return;
+      }
       if (event.code === 'Escape' && state.boost) {
         state.boost = null;
         requestRender();
@@ -2676,6 +3370,7 @@ const GameState = {
   drag: null,          // текущее перетаскивание: {stack, srcSlot, pointerId, x, y}
   boost: null,         // активный буст: {kind, from}
   leaderboard: null,   // экран рейтинга: {open, loading, available, entries, playerRank}
+  settings: null,      // экран настроек: {open, t, drag} — drag это индекс ползунка
   hoverKey: null,      // ключ подсвеченной свободной ячейки под стопкой
   radius: CONFIG.board.radiusSteps[0].radius,   // текущий радиус поля
   camera: { rotation: 0 },                      // угол поворота поля, радианы
@@ -2724,7 +3419,8 @@ function fxAlive(state) {
     state.fx.shake !== null ||
     state.scoreShown !== state.score || state.coinsShown !== state.coins ||
     state.overlayT < 1 ||
-    (state.leaderboard && state.leaderboard.open && state.leaderboard.t < 1);
+    (state.leaderboard && state.leaderboard.open && state.leaderboard.t < 1) ||
+    (state.settings && state.settings.open && state.settings.t < 1);
 }
 
 function stepFx(state, dt) {
@@ -2738,6 +3434,10 @@ function stepFx(state, dt) {
   const board = state.leaderboard;
   if (board && board.open && board.t < 1) {
     board.t = Math.min(1, board.t + dt / a.overlayFadeMs);
+  }
+  const settings = state.settings;
+  if (settings && settings.open && settings.t < 1) {
+    settings.t = Math.min(1, settings.t + dt / a.overlayFadeMs);
   }
 }
 
@@ -3041,6 +3741,7 @@ function checkGameOver(state) {
   if (state.hand.slots.every(s => s === null)) return;
   state.isGameOver = true;
   state.overlayT = 0;                     // оверлей проявляется, а не выпрыгивает
+  Platform.gameplay(false);               // партия кончилась — платформа должна знать
   // признак рекорда считается так же, как в оверлее: updateBest уже отработал
   Audio.over(state.score >= state.best && state.score > 0);
   Platform.vibrate(CONFIG.haptics.over);
@@ -3052,6 +3753,7 @@ function checkGameOver(state) {
 function openLeaderboard(state) {
   state.leaderboard = { open: true, loading: true, available: false, entries: [],
                         playerRank: 0, t: 0 };
+  Platform.gameplay(false);
   startFx(state);
   Platform.fetchLeaderboard().then(result => {
     // t сохраняем: пока грузились данные, экран уже начал проявляться
@@ -3059,6 +3761,50 @@ function openLeaderboard(state) {
     state.leaderboard = Object.assign({ open: true, loading: false, t: shown }, result);
     requestRender();
   });
+}
+
+// --- Экран настроек (Phase 19) ---------------------------------------------
+// Своего состояния у регуляторов нет: они правят CONFIG, а хранилище получает
+// снимок при каждом изменении. Партию настройки не трогают и restart переживают,
+// как кошелёк.
+
+function openSettings(state) {
+  state.settings = { open: true, t: 0, drag: null };
+  Platform.gameplay(false);   // открытый экран — это пауза с точки зрения платформы
+  startFx(state);             // экран проявляется, а не выпрыгивает
+  requestRender();
+}
+
+function closeSettings(state) {
+  state.settings = null;
+  persistSettings();
+  Platform.gameplay(!state.isGameOver);
+  requestRender();
+}
+
+function persistSettings() {
+  Platform.saveSettings({
+    sfx: CONFIG.audio.volumeSfx,
+    music: CONFIG.audio.music.volume,
+    haptics: CONFIG.haptics.enabled,
+    lang: CONFIG.lang
+  });
+}
+
+// Прочитанное из хранилища раскладывается через те же сеттеры, что и ползунки,
+// поэтому живой контекст (если он уже есть) подхватит громкость сразу.
+// Пропущенное или битое значение остаётся тем, что стоит в CONFIG.
+function applySettings(values) {
+  if (!values) return false;
+  const clamp = (v) => (typeof v === 'number' && isFinite(v)
+    ? Math.min(1, Math.max(0, v)) : null);
+  const sfx = clamp(values.sfx);
+  const music = clamp(values.music);
+  if (sfx !== null) Audio.setSfxVolume(sfx);
+  if (music !== null) Audio.setMusicVolume(music);
+  if (typeof values.haptics === 'boolean') CONFIG.haptics.enabled = values.haptics;
+  if (values.lang) setLang(values.lang);
+  return true;
 }
 
 function restart() {
@@ -3075,6 +3821,7 @@ function restart() {
   GameState.drag = null;
   GameState.boost = null;
   GameState.leaderboard = null;
+  GameState.settings = null;      // громкости при этом остаются: они не про партию
   GameState.hoverKey = null;
   resetCamera(GameState);
   input.spin = null;
@@ -3091,6 +3838,7 @@ function restart() {
   GameState.overlayT = 1;
   generators.fillStartBoard(GameState);
   generators.dealHand(GameState);
+  Platform.gameplay(true);         // новая партия пошла
   // во время init контекста ещё нет — первая раздача проходит молча сама собой
   Audio.deal();
   updateMusicTension(GameState);
@@ -3133,8 +3881,10 @@ function init() {
   const canvas = document.getElementById('game');
   render.ctx = canvas.getContext('2d');
   Platform.migrateEconomy();
+  setLang(detectLang());            // язык браузера — пока игрок не выбрал свой
   Platform.initPlatform();          // SDK грузится только на домене платформы
   applyTheme(Object.keys(THEMES)[0]);
+  applySettings(Platform.loadSettings());   // громкости и язык до первого звука
   applySeedFromUrl();
   restart();
   input.attach(canvas, GameState);

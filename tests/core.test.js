@@ -103,21 +103,30 @@ const clearIntervalStub = (id) => { delete intervals[id]; };
 
 // Вибрация: на десктопе её нет, поэтому заглушка ещё и журналит вызовы
 const vibrations = [];
-const navigatorStub = { vibrate: (pattern) => { vibrations.push(pattern); return true; } };
+const navigatorStub = { vibrate: (pattern) => { vibrations.push(pattern); return true; },
+                        language: 'ru-RU' };
+
+// Path2D: значки заданы путями SVG (Phase 23). В Node конструктора нет, поэтому
+// заглушка просто запоминает строку пути — по ней и проверяется кэш.
+const builtPaths = [];
+function Path2DStub(d) { this.d = d; builtPaths.push(d); }
 
 js += '\nmodule.exports = { CONFIG, Platform, Audio, hexMath, generators, mergeEngine, GameState, render,' +
   ' input, restart, updateActiveColors, renderGameToText, radiusForScore, growBoardIfNeeded,' +
-  ' resetCamera, nearestSnapAngle, snapRotation, THEMES, applyTheme, updateMusicTension };';
+  ' resetCamera, nearestSnapAngle, snapRotation, THEMES, applyTheme, updateMusicTension,' +
+  ' openSettings, closeSettings, applySettings, persistSettings,' +
+  ' I18N, t, setLang, detectLang };';
 const mod = { exports: {} };
 new Function('module', 'localStorage', 'requestAnimationFrame', 'document', 'performance',
   'setTimeout', 'window', 'location', 'AudioContext', 'setInterval', 'clearInterval',
-  'navigator', js)
+  'navigator', 'Path2D', js)
   (mod, localStorageStub, raf, documentStub, perf, timeout, windowStub, locationStub,
-   AudioContextStub, setIntervalStub, clearIntervalStub, navigatorStub);
+   AudioContextStub, setIntervalStub, clearIntervalStub, navigatorStub, Path2DStub);
 const { CONFIG, Platform, Audio, hexMath, generators, mergeEngine, GameState, render, input, restart,
   updateActiveColors, renderGameToText, radiusForScore, growBoardIfNeeded,
   resetCamera, nearestSnapAngle, snapRotation, THEMES, applyTheme,
-  updateMusicTension } = mod.exports;
+  updateMusicTension, openSettings, closeSettings, applySettings,
+  persistSettings, I18N, t, setLang, detectLang } = mod.exports;
 
 // Звук между проверками надо гасить: журнал общий, а троттлинг помнит прошлый вызов
 const audioReset = () => { audioLog.length = 0; Audio.lastAt = {}; };
@@ -299,14 +308,17 @@ setBoard({ '0,0': rep(0, 4), '1,0': rep(0, 2), '1,-1': rep(0, 2), '0,-1': rep(0,
 res = mergeEngine.resolveWave(GameState, cell('0,0'));
 check('блок из 10 сгорел, ячейка освободилась', cell('0,0').stack === null, dump());
 check('очки за блок 10 = 10 (переливы не считаются)', res.totalPoints === 10, 'got ' + res.totalPoints);
-check('монет за блок 10 = 10', res.totalCoins === 10, 'got ' + res.totalCoins);
+// монеты платят только за фишки сверх порога (ADR-0007): ровно порог — ноль
+check('блок ровно в порог монет не даёт', res.totalCoins === 0, 'got ' + res.totalCoins);
 
 // 5. горит весь блок целиком: 13 → горят 13, сверх 10 по двойной ставке
 setBoard({ '0,0': rep(0, 4), '1,0': rep(0, 3), '1,-1': rep(0, 3), '0,-1': rep(0, 3) });
 res = mergeEngine.resolveWave(GameState, cell('0,0'));
 check('блок 13 сгорел целиком (не ровно 10)', cell('0,0').stack === null, dump());
 check('очки за блок 13: 10 + 3*2 = 16', res.totalPoints === 16, 'got ' + res.totalPoints);
-check('монет за блок 13 = 13', res.totalCoins === 13, 'got ' + res.totalCoins);
+check('монет за блок 13 = 3 (только сверх порога)',
+  res.totalCoins === mergeEngine.burnCoinsFor(13) && res.totalCoins === 3,
+  'got ' + res.totalCoins);
 
 // 6. под сгоревшим блоком открывается следующий цвет
 setBoard({ '0,0': [1, 1, 0], '1,0': rep(0, 3), '1,-1': rep(0, 3), '0,-1': rep(0, 3) });
@@ -326,11 +338,12 @@ check('очки цепочки: два блока по 10 = 20', res.totalPoints
 check('множителя очков нет: вторая волна даёт те же 10',
   res.steps[1].points === 10, JSON.stringify(res.steps));
 // Комбо (Phase 16) платит монетами, а не очками: первое звено без бонуса,
-// второе даёт comboCoinBonus сверх 10 своих монет.
+// второе даёт comboCoinBonus. Сами блоки здесь ровно в порог, поэтому своих
+// монет не приносят вовсе — весь доход цепочки это и есть бонус за комбо.
 check('комбо считается по звеньям со сгоранием',
   res.steps[0].combo === 1 && res.steps[1].combo === 2, JSON.stringify(res.steps));
-check('монет за цепочку: 10 + 10 + бонус за комбо ×2',
-  res.totalCoins === 20 + CONFIG.scoring.comboCoinBonus, 'got ' + res.totalCoins);
+check('монет за цепочку из двух блоков в порог: только бонус за комбо',
+  res.totalCoins === CONFIG.scoring.comboCoinBonus, 'got ' + res.totalCoins);
 
 // 8. детерминизм: одинаковая доска + ход = одинаковый результат
 const spec = {
@@ -519,7 +532,8 @@ check('внутри Platform localStorage используется', platformSec
 
 console.log('\n--- Phase 5: полировка и кривая сложности ---');
 
-// 1. набор цветов расширяется вместе с кольцами: 4 → 7 → 10
+// 1. набор цветов расширяется по одному цвету за ступень (ADR-0007). Проверки
+// идут по форме лестницы, а не по конкретным порогам: числа — это баланс.
 restart();
 const ringSteps = CONFIG.board.radiusSteps;
 const colorsAt = (score) => { GameState.score = score; updateActiveColors(GameState); return GameState.activeColors; };
@@ -527,14 +541,21 @@ check('в палитре 10 цветов', CONFIG.colors.palette.length === 10,
   'got ' + CONFIG.colors.palette.length);
 check('все цвета палитры различны', new Set(CONFIG.colors.palette).size === 10);
 check('на старте 4 цвета', colorsAt(0) === 4, 'got ' + colorsAt(0));
-check('за очко до первого кольца — всё ещё 4 цвета',
-  colorsAt(ringSteps[1].fromScore - 1) === 4, 'got ' + colorsAt(ringSteps[1].fromScore - 1));
-check('первое кольцо приносит +3 цвета (7)',
-  colorsAt(ringSteps[1].fromScore) === 7, 'got ' + colorsAt(ringSteps[1].fromScore));
-check('за очко до второго кольца — всё ещё 7',
-  colorsAt(ringSteps[2].fromScore - 1) === 7, 'got ' + colorsAt(ringSteps[2].fromScore - 1));
-check('второе кольцо приносит ещё +3 цвета (10)',
-  colorsAt(ringSteps[2].fromScore) === 10, 'got ' + colorsAt(ringSteps[2].fromScore));
+check('первая ступень начинается с нуля очков', ringSteps[0].fromScore === 0);
+check('пороги ступеней строго растут',
+  ringSteps.every((s, i) => i === 0 || s.fromScore > ringSteps[i - 1].fromScore),
+  ringSteps.map(s => s.fromScore).join(', '));
+check('каждая ступень добавляет ровно один цвет — скачок +3 обрывал партию',
+  ringSteps.every((s, i) => i === 0 || s.colors === ringSteps[i - 1].colors + 1),
+  ringSteps.map(s => s.colors).join(', '));
+ringSteps.forEach((step, i) => {
+  if (i === 0) return;
+  check(`за очко до порога ${step.fromScore} цветов ещё ${ringSteps[i - 1].colors}`,
+    colorsAt(step.fromScore - 1) === ringSteps[i - 1].colors,
+    'got ' + colorsAt(step.fromScore - 1));
+  check(`на пороге ${step.fromScore} цветов становится ${step.colors}`,
+    colorsAt(step.fromScore) === step.colors, 'got ' + colorsAt(step.fromScore));
+});
 check('дальше набор не растёт', colorsAt(999999) === 10, 'got ' + colorsAt(999999));
 check('число цветов не превышает размер палитры',
   ringSteps.every(s => s.colors <= CONFIG.colors.palette.length));
@@ -624,6 +645,272 @@ restart();
 check('подсказка видна на старте', GameState.showHint === true);
 input.placeStack(GameState, { tiles: [0], cell: null }, anyFreeCell());
 check('подсказка гаснет после первого хода', GameState.showHint === false);
+
+console.log('\n--- Phase 23: язык интерфейса ---');
+
+// 1. словари полны и совпадают по ключам — иначе на одном языке появятся дыры
+const langs = Object.keys(I18N);
+check('языков ровно два: русский и английский',
+  langs.length === 2 && I18N.ru && I18N.en, langs.join(', '));
+const ruKeys = Object.keys(I18N.ru).sort();
+const enKeys = Object.keys(I18N.en).sort();
+check('наборы ключей совпадают', ruKeys.join(',') === enKeys.join(','),
+  'ru=' + ruKeys.length + ' en=' + enKeys.length);
+check('пустых строк в словарях нет',
+  langs.every(l => ruKeys.every(k => typeof I18N[l][k] === 'string' && I18N[l][k].length)));
+check('ключи бустов есть в словаре',
+  CONFIG.boosts.every(b => I18N.ru[b.label] && (!b.hint || I18N.ru[b.hint])));
+
+// 2. t() отдаёт строку текущего языка, неизвестный ключ возвращает сам ключ
+const langWas = CONFIG.lang;
+setLang('ru');
+check('t() на русском', t('restart') === I18N.ru.restart);
+setLang('en');
+check('t() на английском', t('restart') === I18N.en.restart);
+check('неизвестный ключ виден как есть', t('нет-такого') === 'нет-такого');
+check('неизвестный язык не переключается', setLang('de') === false && CONFIG.lang === 'en');
+
+// 3. язык берётся из браузера, пока игрок не выбрал свой
+navigatorStub.language = 'ru-RU';
+check('русский браузер — русский язык', detectLang() === 'ru');
+navigatorStub.language = 'en-US';
+check('любой другой — английский', detectLang() === 'en');
+navigatorStub.language = 'ru-RU';
+
+// 4. переключатель в настройках: меняет язык и сохраняет выбор
+setLang('ru');
+restart();
+openSettings(GameState);
+const enButton = render.langButtonRect(langs.indexOf('en'));
+fire('pointerdown', enButton.x + enButton.w / 2, enButton.y + enButton.h / 2);
+check('кнопка EN переключает язык', CONFIG.lang === 'en');
+check('выбор языка сохранён',
+  JSON.parse(store[CONFIG.storage.settingsKey]).lang === 'en',
+  store[CONFIG.storage.settingsKey]);
+check('кадр на английском рисуется', (() => {
+  try {
+    render.drawAll(GameState);
+    return true;
+  } catch (e) {
+    return false;
+  }
+})());
+closeSettings(GameState);
+check('applySettings поднимает язык из хранилища',
+  applySettings({ lang: 'ru' }) === true && CONFIG.lang === 'ru');
+
+// 5. кнопки языка не наезжают на кнопку «Назад» и помещаются в канвас
+const lastLangRect = render.langButtonRect(langs.length - 1);
+check('кнопки языка внутри канваса',
+  lastLangRect.x + lastLangRect.w <= CONFIG.canvas.width);
+check('ряд языка выше кнопки «Назад»',
+  lastLangRect.y + lastLangRect.h < render.restartButtonRect().y);
+
+// 6. в коде отрисовки не осталось зашитых русских строк — иначе перевод дырявый
+const i18nSection = js.slice(js.indexOf('const I18N = {'), js.indexOf('function t(key)'));
+const withoutTexts = js.replace(i18nSection, '');
+const hardcodedText = withoutTexts.match(/fillText\(\s*['"][^'"]*[А-Яа-яЁё][^'"]*['"]/g) || [];
+check('русских строк в fillText вне I18N нет',
+  hardcodedText.length === 0, hardcodedText.join(' | '));
+
+setLang(langWas);
+
+console.log('\n--- Phase 22: значки и матовая бумага ---');
+
+// 1. матовость задаётся темой, а не литералами в рендере
+const matte = THEMES.paper.matte;
+check('тема задаёт параметры матовой поверхности',
+  typeof matte === 'object' && typeof matte.shadow === 'string' && matte.blur > 0);
+check('зерна на фишках больше нет — по playtest оно читалось как белые точки',
+  matte.grain === undefined && !/grain/.test(THEMES.paper.tile.toString()));
+check('тень фишки мягче, чем была до фазы (blur 7, offsetY 3)',
+  matte.blur < 7 && matte.offsetY < 3,
+  'blur=' + matte.blur + ' offsetY=' + matte.offsetY);
+
+// 2. значки — векторные пути SVG, рисуются через Path2D
+check('у каждого буста есть значок',
+  CONFIG.boosts.every(b => render.iconPaths[b.kind]),
+  Object.keys(render.iconPaths).join(', '));
+check('значки монеты и кубка тоже заданы путями',
+  !!render.iconPaths.coin && !!render.iconPaths.trophy);
+check('пути записаны в системе SVG — начинаются с команды M',
+  Object.keys(render.iconPaths).every(name => {
+    const icon = render.iconPaths[name];
+    return (!icon.fill || icon.fill.startsWith('M')) &&
+      (!icon.stroke || icon.stroke.startsWith('M'));
+  }));
+
+let iconsOk = true;
+try {
+  render.coinIcon(50, 50, 9);
+  render.trophyIcon(400, 40, CONFIG.ui.trophySize);
+  CONFIG.boosts.forEach(b => render.boostIcon(b.kind, 100, 100, 18));
+  render.boostIcon('неизвестный', 100, 100, 18);   // чужой вид не должен ронять кадр
+} catch (e) {
+  iconsOk = false;
+}
+check('значки монеты, кубка и бустов рисуются', iconsOk);
+check('неизвестный значок рисоваться не берётся',
+  render.drawIcon('такого нет', 0, 0, 10, '#000') === false);
+
+// Path2D строится один раз на путь: иначе на каждый кадр приходились бы новые
+const pathsBefore = builtPaths.length;
+render.coinIcon(50, 50, 9);
+render.coinIcon(80, 50, 9);
+check('Path2D кэшируется, а не строится каждый кадр',
+  builtPaths.length === pathsBefore, 'построено ещё ' + (builtPaths.length - pathsBefore));
+check('в кэше лежат Path2D по строке пути',
+  render.iconCache.get(render.iconPaths.coin.fill) instanceof Path2DStub);
+
+// 3. ширина строки: measureText есть не во всяком контексте (здесь канвас —
+// заглушка), поэтому у значка кубка должен быть запасной расчёт
+check('textWidth работает без measureText',
+  render.textWidth('Рекорд: 1234', 10) === 120,
+  'got ' + render.textWidth('Рекорд: 1234', 10));
+check('кубок помещается левее строки рекорда и правее счёта',
+  CONFIG.ui.bestX - render.textWidth('Рекорд: 88888', 10) - CONFIG.ui.trophyGap >
+  CONFIG.canvas.width / 2 + 60);
+
+// 4. кнопки бустов: подписей нет, значок и цена помещаются внутрь
+const barCfg = CONFIG.ui.boostBar;
+check('значок и цена внутри кнопки',
+  barCfg.iconY - barCfg.iconSize / 2 > 0 && barCfg.priceY + 10 < barCfg.h &&
+  barCfg.iconY + barCfg.iconSize / 2 < barCfg.priceY);
+check('подписей на кнопках бустов больше нет',
+  !/boost\.label/.test(render.drawBoostBar.toString()));
+check('кнопки бустов не наезжают на нижний край канваса',
+  barCfg.y + barCfg.h <= CONFIG.canvas.height,
+  'низ кнопок ' + (barCfg.y + barCfg.h));
+check('три кнопки помещаются по ширине',
+  CONFIG.boosts.length * barCfg.w + (CONFIG.boosts.length - 1) * barCfg.gap
+  <= CONFIG.canvas.width);
+
+console.log('\n--- Phase 19: экран настроек ---');
+
+// 1. кнопка-шестерёнка: в углу канваса и не наезжает на строку рекорда
+const gear = render.settingsButtonRect();
+check('шестерёнка внутри канваса',
+  gear.x >= 0 && gear.y >= 0 &&
+  gear.x + gear.w <= CONFIG.canvas.width && gear.y + gear.h <= CONFIG.canvas.height,
+  JSON.stringify(gear));
+check('строка рекорда заканчивается левее шестерёнки', CONFIG.ui.bestX < gear.x,
+  'bestX=' + CONFIG.ui.bestX + ' кнопка с ' + gear.x);
+const gearCenter = { x: gear.x + gear.w / 2, y: gear.y + gear.h / 2 };
+
+// 2. открытие и закрытие
+restart();
+fire('pointerdown', gearCenter.x, gearCenter.y);
+check('клик по шестерёнке открывает настройки',
+  GameState.settings !== null && GameState.settings.open === true);
+
+// 3. открытый экран забирает ввод целиком
+const settingsSlot = filledSlot();
+const settingsSlotCenter = render.handSlotCenter(settingsSlot);
+fire('pointerdown', settingsSlotCenter.x, settingsSlotCenter.y);
+check('на экране настроек стопку из руки не взять',
+  GameState.drag === null && GameState.hand.slots[settingsSlot] !== null);
+input.spin = null;
+fire('pointerdown', cell('0,0').pixelX, cell('0,0').pixelY);
+check('на экране настроек поле не вращается', input.spin === null);
+
+// 4. ползунки: середина дорожки — половина громкости, края зажаты
+const sfxTrack = render.settingsSliderRect(0);
+const musicTrack = render.settingsSliderRect(1);
+fire('pointerdown', sfxTrack.x + sfxTrack.w / 2, sfxTrack.y + sfxTrack.h / 2);
+check('клик в середину дорожки даёт половину громкости',
+  Math.abs(CONFIG.audio.volumeSfx - 0.5) < 0.051, 'got ' + CONFIG.audio.volumeSfx);
+check('нажатие на ползунок начинает жест', GameState.settings.drag === 0);
+fire('pointermove', sfxTrack.x + sfxTrack.w * 0.25, sfxTrack.y);
+check('протаскивание меняет громкость на ходу',
+  Math.abs(CONFIG.audio.volumeSfx - 0.25) < 0.051, 'got ' + CONFIG.audio.volumeSfx);
+fire('pointermove', sfxTrack.x - 500, sfxTrack.y);
+check('левее дорожки значение зажато нулём', CONFIG.audio.volumeSfx === 0,
+  'got ' + CONFIG.audio.volumeSfx);
+fire('pointermove', sfxTrack.x + sfxTrack.w + 500, sfxTrack.y);
+check('правее дорожки значение зажато единицей', CONFIG.audio.volumeSfx === 1,
+  'got ' + CONFIG.audio.volumeSfx);
+fire('pointerup', sfxTrack.x + sfxTrack.w, sfxTrack.y);
+check('отпускание завершает жест ползунка', GameState.settings.drag === null);
+check('громкость ушла в хранилище одним ключом',
+  JSON.parse(store[CONFIG.storage.settingsKey]).sfx === 1,
+  store[CONFIG.storage.settingsKey]);
+
+// 5. регулятор «Звуки» на нуле глушит эффекты, но не музыку — шины разные
+Audio.setSfxVolume(0);
+audioReset();
+Audio.burn(12);
+check('на нуле эффекты не звучат вовсе', audioLog.length === 0, 'узлов ' + audioLog.length);
+audioReset();
+Audio.music.nextAt = audioNow;   // иначе горизонт уже разложен и класть нечего
+Audio.pumpMusic();
+check('музыка регулятором звуков не глушится', audioLog.length > 0);
+Audio.setSfxVolume(1);
+audioReset();
+Audio.burn(12);
+check('вернули громкость — эффекты снова слышны', audioLog.length > 0);
+audioReset();
+
+// 6. регулятор музыки на нуле останавливает планировщик, а не крутит его впустую
+Audio.setMusicVolume(0);
+check('музыка на нуле останавливает планировщик', Audio.music.timer === null);
+check('шина музыки при этом молчит', Audio.music.out.gain.value === 0,
+  'got ' + Audio.music.out.gain.value);
+Audio.setMusicVolume(1);
+check('возврат громкости заводит планировщик снова', Audio.music.timer !== null);
+check('шина музыки вернулась к своей калибровке',
+  Math.abs(Audio.music.out.gain.value - CONFIG.audio.music.gain) < 1e-9);
+
+// 7. тумблер вибрации
+const toggle = render.settingsToggleRect();
+const hapticsWas = CONFIG.haptics.enabled;
+fire('pointerdown', toggle.x + toggle.w / 2, toggle.y + toggle.h / 2);
+check('тумблер переключает вибрацию', CONFIG.haptics.enabled === !hapticsWas);
+vibrations.length = 0;
+CONFIG.haptics.enabled = false;
+check('выключенная вибрация не доходит до платформы',
+  Platform.vibrate(20) === false && vibrations.length === 0);
+CONFIG.haptics.enabled = true;
+
+// 8. хранилище: снимок пишется при закрытии, битое значение не ломает игру
+CONFIG.audio.volumeSfx = 0.4;
+CONFIG.audio.music.volume = 0.6;
+closeSettings(GameState);
+check('кнопка «Назад» закрывает экран', GameState.settings === null);
+const stored = Platform.loadSettings();
+check('настройки прочитались обратно',
+  stored.sfx === 0.4 && stored.music === 0.6 && stored.haptics === true,
+  JSON.stringify(stored));
+store[CONFIG.storage.settingsKey] = '{не json';
+check('битое значение в хранилище даёт null, а не исключение',
+  Platform.loadSettings() === null);
+check('пустые настройки ничего не меняют', applySettings(null) === false);
+check('CONFIG при этом не тронут', CONFIG.audio.volumeSfx === 0.4);
+applySettings({ sfx: 2, music: -1, haptics: 'да' });
+check('значения из хранилища зажимаются в 0…1',
+  CONFIG.audio.volumeSfx === 1 && CONFIG.audio.music.volume === 0);
+check('нестроковый выключатель вибрации игнорируется', CONFIG.haptics.enabled === true);
+
+// 9. громкости переживают новую партию — они не про партию, а про игрока
+applySettings({ sfx: 0.3, music: 0.7, haptics: false });
+restart();
+check('restart громкости не сбрасывает',
+  CONFIG.audio.volumeSfx === 0.3 && CONFIG.audio.music.volume === 0.7);
+check('restart закрывает экран настроек', GameState.settings === null);
+
+// 10. кадр с открытым экраном рисуется целиком
+openSettings(GameState);
+let settingsDrawOk = true;
+try {
+  render.drawAll(GameState);
+} catch (e) {
+  settingsDrawOk = false;
+}
+check('кадр с открытым экраном настроек рисуется', settingsDrawOk);
+closeSettings(GameState);
+
+// возвращаем звук к исходному состоянию: дальше идут проверки музыки
+applySettings({ sfx: 1, music: 1, haptics: true });
+audioReset();
 
 console.log('\n--- Phase 18: музыка и вибрация ---');
 
@@ -978,8 +1265,11 @@ restart();
 setBoardForBurn();
 GameState.coins = 0;
 playBurnMove();
+// блок ровно в порог своих монет не даёт (ADR-0007), поэтому любой ненулевой
+// кошелёк здесь означал бы, что бонус начислили за одно звено
 check('одиночное сгорание бонуса за комбо не даёт',
-  GameState.coins === 10, 'coins=' + GameState.coins);
+  GameState.coins === mergeEngine.burnCoinsFor(10) && GameState.coins === 0,
+  'coins=' + GameState.coins);
 restart();
 
 console.log('\n--- Phase 15: анимации и juice ---');
@@ -1128,7 +1418,7 @@ themeNames.forEach(name => {
   GameState.coins = 0;
   playBurnMove();
   check(`в теме «${THEMES[name].name}» ход проходит и блок сгорает`,
-    GameState.score === 10 && GameState.coins === 10,
+    GameState.score === 10 && GameState.coins === mergeEngine.burnCoinsFor(10),
     'score=' + GameState.score);
   render.drawAll(GameState);          // отрисовка не должна падать
   check(`в теме «${THEMES[name].name}» полный кадр рисуется без ошибок`, true);
@@ -1571,7 +1861,7 @@ GameState.score = 0;
 GameState.coins = 0;
 playBurnMove();
 check('одноцветные соседи точки сбора собрались в неё и блок сгорел',
-  GameState.score === 10 && GameState.coins === 10,
+  GameState.score === 10 && GameState.coins === mergeEngine.burnCoinsFor(10),
   'score=' + GameState.score + ' coins=' + GameState.coins);
 check('после сгорания все четыре ячейки свободны',
   ['0,0', '1,0', '1,-1', '0,-1'].every(k => cell(k).stack === null), dump());
@@ -1597,23 +1887,26 @@ console.log('\n--- Phase 8: рост поля кольцами ---');
 
 const cellsFor = (radius) => 3 * radius * radius + 3 * radius + 1;
 const steps = CONFIG.board.radiusSteps;
+// В лестнице есть промежуточные ступени, где растут только цвета (ADR-0007),
+// поэтому порог кольца — это первое появление радиуса, а не индекс ступени.
+const ringAt = (radius) => steps.find(s => s.radius === radius).fromScore;
 
 // 1. радиус по счёту
 check('на старте радиус 2 (19 ячеек)',
   radiusForScore(0) === 2 && cellsFor(2) === 19);
 check('за очко до первого порога радиус ещё 2',
-  radiusForScore(steps[1].fromScore - 1) === 2);
+  radiusForScore(ringAt(3) - 1) === 2);
 check('на первом пороге радиус 3 (37 ячеек)',
-  radiusForScore(steps[1].fromScore) === 3 && cellsFor(3) === 37);
+  radiusForScore(ringAt(3)) === 3 && cellsFor(3) === 37);
 check('на втором пороге радиус 4 (61 ячейка)',
-  radiusForScore(steps[2].fromScore) === 4 && cellsFor(4) === 61);
+  radiusForScore(ringAt(4)) === 4 && cellsFor(4) === 61);
 check('дальше поле не растёт', radiusForScore(999999) === 4);
 
 // 2. рост сохраняет стопки и добавляет пустые ячейки
 restart();
 setBoard({ '0,0': [0, 0], '2,-2': [1, 1, 1], '-2,2': [2] });
 const beforeDump = dump();
-GameState.score = steps[1].fromScore;
+GameState.score = ringAt(3);
 let grew = growBoardIfNeeded(GameState);
 check('growBoardIfNeeded сообщил о росте', grew === true);
 check('после первого кольца 37 ячеек', GameState.cells.size === 37, 'got ' + GameState.cells.size);
@@ -1632,7 +1925,7 @@ check('newRing содержит 18 новых ячеек',
 
 // 3. повторный вызов на том же счёте ничего не делает
 check('без нового порога рост не срабатывает', growBoardIfNeeded(GameState) === false);
-GameState.score = steps[2].fromScore;
+GameState.score = ringAt(4);
 check('второй порог даёт 61 ячейку',
   growBoardIfNeeded(GameState) === true && GameState.cells.size === 61,
   'got ' + GameState.cells.size);
@@ -1852,12 +2145,15 @@ check('старых ключей burnBasePoints/pointsPerFlowedTile в CONFIG н
   CONFIG.scoring.burnBasePoints === undefined &&
   CONFIG.scoring.pointsPerFlowedTile === undefined);
 
-// 2. монеты равны числу сгоревших фишек, очки — по формуле
+// 2. очки по формуле, монеты — только за фишки сверх порога (ADR-0007)
 setBoard({ '0,0': rep(0, 4), '1,0': rep(0, 3), '1,-1': rep(0, 3), '0,-1': rep(0, 3) });
 res = mergeEngine.resolveWave(GameState, cell('0,0'));
-check('13 фишек → 16 очков и 13 монет',
-  res.totalPoints === 16 && res.totalCoins === 13,
+check('13 фишек → 16 очков и 3 монеты',
+  res.totalPoints === 16 && res.totalCoins === 3,
   'points=' + res.totalPoints + ' coins=' + res.totalCoins);
+check('формула монет: платят только фишки сверх порога',
+  mergeEngine.burnCoinsFor(10) === 0 && mergeEngine.burnCoinsFor(13) === 3 &&
+  mergeEngine.burnCoinsFor(25) === 15);
 
 // 2б. очки идут только за исчезновение: перелив 9 фишек без сгорания = 0 очков
 setBoard({ '0,0': rep(0, 2), '1,0': rep(0, 3), '1,-1': rep(0, 3) });
@@ -1888,39 +2184,45 @@ check('одиночное сгорание в первой волне тоже 1
 delete store[CONFIG.storage.coinsKey];
 restart();
 check('кошелёк пуст на чистом хранилище', GameState.coins === 0, 'coins=' + GameState.coins);
-setBoardForBurn();
+// блок ровно в порог монет не даёт, поэтому кошелёк проверяем на крупном:
+// 4 + 3 + 3 + 3 = 13 фишек, из них платят три
+setBoard({ '0,0': rep(0, 4), '1,0': rep(0, 3), '0,-1': rep(0, 3) });
 GameState.coins = 0;
-playBurnMove();
-check('за сгорание 10 фишек начислено 10 монет', GameState.coins === 10, 'coins=' + GameState.coins);
+input.placeStack(GameState, { tiles: rep(0, 3), cell: null }, cell('1,-1'));
+const bigBurnCoins = mergeEngine.burnCoinsFor(13);
+check('за блок из 13 фишек начислено 3 монеты',
+  GameState.coins === bigBurnCoins && bigBurnCoins === 3, 'coins=' + GameState.coins);
 check('кошелёк записан в хранилище через Platform',
-  store[CONFIG.storage.coinsKey] === '10', 'stored=' + store[CONFIG.storage.coinsKey]);
+  store[CONFIG.storage.coinsKey] === String(bigBurnCoins),
+  'stored=' + store[CONFIG.storage.coinsKey]);
 restart();
 check('restart обнуляет счёт, но не кошелёк',
-  GameState.score === 0 && GameState.coins === 10, 'coins=' + GameState.coins);
-check('Platform.loadCoins читает кошелёк', Platform.loadCoins() === 10);
+  GameState.score === 0 && GameState.coins === bigBurnCoins, 'coins=' + GameState.coins);
+check('Platform.loadCoins читает кошелёк', Platform.loadCoins() === bigBurnCoins);
 check('Platform.loadCoins выдерживает мусор в хранилище', (() => {
   store[CONFIG.storage.coinsKey] = 'ой';
   return Platform.loadCoins() === 0;
 })());
 
-// 5. миграция экономики: рекорд из старой шкалы сбрасывается один раз
+// 5. миграция экономики: прогресс из старой шкалы сбрасывается один раз.
+// С версии 3 (Phase 23) сбрасывается и кошелёк: в Phase 21 сменилась формула
+// монет, и накопленные тысячи обесценили бы бусты.
 store[CONFIG.storage.bestKey] = '2288';         // рекорд, набранный в MVP
+store[CONFIG.storage.coinsKey] = '7409';        // кошелёк со старой экономики
 delete store[CONFIG.storage.economyKey];
 const migrated = Platform.migrateEconomy();
 check('первый запуск новой экономики сбрасывает старый рекорд',
   migrated === true && store[CONFIG.storage.bestKey] === '0',
   'best=' + store[CONFIG.storage.bestKey]);
+check('вместе с рекордом обнуляется кошелёк',
+  store[CONFIG.storage.coinsKey] === '0', 'coins=' + store[CONFIG.storage.coinsKey]);
 check('версия экономики записана',
   store[CONFIG.storage.economyKey] === String(CONFIG.storage.economyVersion));
 store[CONFIG.storage.bestKey] = '150';          // рекорд уже в новой шкале
-check('повторный запуск рекорд не трогает',
-  Platform.migrateEconomy() === false && store[CONFIG.storage.bestKey] === '150');
-check('миграция не касается кошелька', (() => {
-  store[CONFIG.storage.coinsKey] = '77';
-  delete store[CONFIG.storage.economyKey];
-  Platform.migrateEconomy();
-  return store[CONFIG.storage.coinsKey] === '77';
-})());
+store[CONFIG.storage.coinsKey] = '77';
+check('повторный запуск прогресс не трогает',
+  Platform.migrateEconomy() === false && store[CONFIG.storage.bestKey] === '150' &&
+  store[CONFIG.storage.coinsKey] === '77');
 
 console.log('\n--- Phase X: QA-хуки, seed, Platform ---');
 
@@ -1976,9 +2278,15 @@ const afterHookSeed = dump();
 windowStub.__SET_SEED__(99);
 check('__SET_SEED__ перезапускает партию воспроизводимо', dump() === afterHookSeed);
 
-// 5. Platform: showAd/onPause — заглушки, ничего не ломают и ничего не возвращают
+// 5. Platform: showAd остался заглушкой, пауза платформы — уже нет (Phase 20)
 check('Platform.showAd — безвредная заглушка', Platform.showAd() === undefined);
-check('Platform.onPause — безвредная заглушка', Platform.onPause() === undefined);
+Platform.gameplayRunning = true;
+check('пауза платформы глушит музыку и снимает геймплей',
+  Platform.onPause() === true && Audio.music.timer === null &&
+  Platform.gameplayRunning === false);
+check('возобновление возвращает музыку и геймплей',
+  Platform.onResume() === true && Audio.music.timer !== null &&
+  Platform.gameplayRunning === true);
 check('Platform.loadBest на пустом хранилище даёт 0', (() => {
   delete store[CONFIG.storage.bestKey];
   return Platform.loadBest() === 0;
@@ -1994,8 +2302,8 @@ check('в index.html нет внешних подключений (script src / 
   !/\bimport\s+.*from\b/.test(js) && !/\brequire\(/.test(js));
 check('канвас один', (html.match(/<canvas/g) || []).length === 1);
 check('все секции спеки §14 на месте',
-  ['const CONFIG', 'const Platform', 'const Audio', 'const hexMath', 'const generators',
-    'const mergeEngine', 'const render', 'const input', 'const GameState']
+  ['const CONFIG', 'const I18N', 'const Platform', 'const Audio', 'const hexMath',
+    'const generators', 'const mergeEngine', 'const render', 'const input', 'const GameState']
     .every(marker => js.includes(marker)));
 
 // Проверки рейтинга вынесены в конец и выполняются асинхронно: fetchLeaderboard
@@ -2071,6 +2379,32 @@ check('все секции спеки §14 на месте',
     GameState.isGameOver === true && submitted.length === submittedBefore + 1 &&
     submitted[submitted.length - 1].score === 777);
   Platform.leaderboards = null;
+
+  // 6a. обязательная разметка платформы (Phase 20): без LoadingAPI.ready()
+  // модерация Яндекса игру не пропускает
+  const sdkCalls = [];
+  Platform.sdk = {
+    features: {
+      LoadingAPI: { ready: () => sdkCalls.push('ready') },
+      GameplayAPI: { start: () => sdkCalls.push('start'), stop: () => sdkCalls.push('stop') }
+    }
+  };
+  check('gameReady шлёт платформе сигнал готовности',
+    Platform.gameReady() === true && sdkCalls[0] === 'ready');
+  Platform.gameplayRunning = false;
+  Platform.gameplay(true);
+  check('начало партии уходит как start', sdkCalls[sdkCalls.length - 1] === 'start');
+  check('повторный start платформе не отправляется',
+    Platform.gameplay(true) === false &&
+    sdkCalls.filter(c => c === 'start').length === 1);
+  Platform.gameplay(false);
+  check('конец партии уходит как stop', sdkCalls[sdkCalls.length - 1] === 'stop');
+  Platform.sdk = { features: {} };
+  check('SDK без нужных разделов не роняет игру',
+    Platform.gameReady() === false && Platform.gameplay(true) === false);
+  Platform.sdk = null;
+  check('без SDK разметка молчит',
+    Platform.gameReady() === false && Platform.gameplay(false) === false);
 
   // 7. экран рейтинга открывается с оверлея и закрывается кнопкой
   GameState.isGameOver = true;
