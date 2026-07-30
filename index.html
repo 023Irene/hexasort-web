@@ -62,13 +62,18 @@ const CONFIG = {
                // невозможно, скучно после 40 минут». Замер подтверждал — сильная
                // игра шла 957 ходов. Стало пять цветов на старте и вдвое более
                // тесная лестница: партия мастера 514 ходов, счёт 5150 → 2508.
+               // Phase 29: рост поля стал редкой наградой — просьба пользователя
+               // «новые ячейки не на 500, а на 2000». Буквальный сдвиг делал рост
+               // недостижимым (замер: партия кончалась на 935 очках, до кольца не
+               // доживала ни одна), поэтому цвета добавляются медленнее: до 2000
+               // очков поле остаётся стартовым, но и палитра почти не растёт.
                radiusSteps: [
                  { fromScore: 0,    radius: 2, colors: 5  },
-                 { fromScore: 500,  radius: 3, colors: 6  },   // второе кольцо
-                 { fromScore: 900,  radius: 3, colors: 7  },
-                 { fromScore: 1400, radius: 4, colors: 8  },   // третье кольцо
-                 { fromScore: 2000, radius: 4, colors: 9  },
-                 { fromScore: 2600, radius: 4, colors: 10 }
+                 { fromScore: 1000, radius: 2, colors: 6  },   // цвет без роста поля
+                 { fromScore: 2000, radius: 3, colors: 7  },   // второе кольцо
+                 { fromScore: 3000, radius: 3, colors: 8  },
+                 { fromScore: 4500, radius: 4, colors: 9  },   // третье кольцо
+                 { fromScore: 6000, radius: 4, colors: 10 }
                ] },
   hex:       { orientation: 'flat', maxSize: 55 },
   // Ступени стопок. Состав руки за партию **переворачивается**: начинается с
@@ -84,9 +89,9 @@ const CONFIG = {
                blocksByType: { mono: 1, duo: 2, tri: 3, quad: 4 },
                stages: [
                  { fromScore: 0,    weights: { mono: 50, duo: 30, tri: 15, quad: 5  }, minHeight: 2, maxHeight: 5 },
-                 { fromScore: 800,  weights: { mono: 35, duo: 30, tri: 25, quad: 10 }, minHeight: 3, maxHeight: 6 },
-                 { fromScore: 2500, weights: { mono: 20, duo: 25, tri: 30, quad: 25 }, minHeight: 4, maxHeight: 7 },
-                 { fromScore: 7500, weights: { mono: 5,  duo: 15, tri: 30, quad: 50 }, minHeight: 5, maxHeight: 9 }
+                 { fromScore: 700,  weights: { mono: 35, duo: 30, tri: 25, quad: 10 }, minHeight: 3, maxHeight: 6 },
+                 { fromScore: 1800, weights: { mono: 20, duo: 25, tri: 30, quad: 25 }, minHeight: 4, maxHeight: 7 },
+                 { fromScore: 5000, weights: { mono: 5,  duo: 15, tri: 30, quad: 50 }, minHeight: 5, maxHeight: 9 }
                ],
                // Стартовое поле раскладывается отдельно и всегда простыми стопками.
                // Ступени выше — про руку: если раздать ими ещё и доску, партия
@@ -415,7 +420,7 @@ const CONFIG = {
                // версия 3 (Phase 23): в Phase 21 сменились и шкала прогрессии,
                // и формула монет, поэтому прежние рекорд и кошелёк несопоставимы
                // с новыми — сбрасываются один раз оба
-               economyKey: 'hexasort_economy', economyVersion: 5 },
+               economyKey: 'hexasort_economy', economyVersion: 6 },
 
   // Оформление и геометрия отрисовки
   ui: {
@@ -1882,9 +1887,18 @@ const mergeEngine = {
     });
   },
 
-  // Долить фишки в целевую стопку; возвращает число перетёкших фишек
+  // Долить фишки в целевую стопку; возвращает число перетёкших фишек.
+  //
+  // Стопки в ячейке может уже не быть, и это не ошибка: в очереди волны бывают две
+  // соседние ячейки, и пока planWave собирал потоки для второй, первая успела отдать
+  // ей свой последний блок и опустеть. Раньше здесь падало исключение и партия
+  // обрывалась (ловилось замером: seed 114 у бота sloppy). Ячейка просто занимается
+  // заново: свой блок она отдала, а этот получила от другого соседа.
   applyFlowArrival(state, cell, flows) {
     let flowed = 0;
+    if (!cell.stack && flows.length) {
+      cell.stack = { tiles: [], cell: { q: cell.q, r: cell.r } };
+    }
     flows.forEach(f => {
       for (let i = 0; i < f.count; i++) cell.stack.tiles.push(f.color);
       flowed += f.count;

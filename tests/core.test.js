@@ -1800,7 +1800,8 @@ GameState.camera.rotation = rad(60);
 restart();
 check('restart возвращает поле прямо', GameState.camera.rotation === 0);
 GameState.camera.rotation = rad(60);
-GameState.score = CONFIG.board.radiusSteps[1].fromScore;
+GameState.score = CONFIG.board.radiusSteps.find(
+  (st, i) => i > 0 && st.radius > CONFIG.board.radiusSteps[i - 1].radius).fromScore;
 growBoardIfNeeded(GameState);
 check('рост кольца тоже выпрямляет поле', GameState.camera.rotation === 0);
 restart();
@@ -2033,13 +2034,21 @@ check('restart вернул поле к 19 ячейкам',
   GameState.cells.size === 19 && GameState.radius === 2 &&
   hexMath.layout.size === hexMath.fitLayout(2).size);
 
-// 6. рост случается в живой игре и только после волны
+// 6. рост случается в живой игре и только после волны.
+// С Phase 29 ступень «добавился цвет» и ступень «выросло поле» — разные, поэтому
+// порог берётся не по индексу, а по первому реальному увеличению радиуса
+const firstGrowStep = steps.find((st, i) => i > 0 && st.radius > steps[i - 1].radius);
 restart();
-setBoardForBurn();
-GameState.score = steps[1].fromScore - 10;      // setBoard обнулил счёт
-playBurnMove();                                  // +10 очков → ровно порог
+// счёт ставим так, чтобы ход перешагнул порог роста. Ход даёт очки за сгорание
+// блока в текущий порог — а он с Phase 28 сам зависит от счёта, поэтому берём
+// порог на очко раньше цели и собираем блок ровно такого размера
+const growScore = firstGrowStep.fromScore;
+const burnSize = mergeEngine.thresholdFor(growScore - 1);
+setBoard({ '0,0': rep(0, burnSize - 6), '1,0': rep(0, 2), '1,-1': rep(0, 2), '0,-1': rep(0, 2) });
+GameState.score = growScore - mergeEngine.burnPointsFor(burnSize);
+input.placeStack(GameState, { tiles: rep(0, 2), cell: null }, cell('1,1'));
 check('после хода, перешагнувшего порог, поле выросло',
-  GameState.cells.size === 37 && GameState.radius === 3,
+  GameState.cells.size === 37 && GameState.radius === firstGrowStep.radius,
   'cells=' + GameState.cells.size + ' score=' + GameState.score);
 check('анимация кольца завершилась, ввод разблокирован',
   GameState.newRing === null && GameState.isAnimating === false);
@@ -2053,7 +2062,7 @@ check('координаты старых ячеек пересчитаны по�
 restart();
 GameState.cells.forEach(c => { c.stack = { tiles: [((c.q - c.r) % 3 + 3) % 3], cell: { q: c.q, r: c.r } }; });
 cell('0,0').stack = null;
-GameState.score = steps[1].fromScore;           // порог уже достигнут
+GameState.score = firstGrowStep.fromScore;      // порог роста уже достигнут
 // цвет 0 совпадает с раскраской самой ячейки (0,0), а не соседей — слияния не будет
 input.placeStack(GameState, { tiles: [0], cell: null }, cell('0,0'));
 check('кольцо появилось до проверки проигрыша — партия продолжается',
@@ -2442,6 +2451,56 @@ check('все секции спеки §14 на месте',
   ['const CONFIG', 'const I18N', 'const Platform', 'const Audio', 'const hexMath',
     'const generators', 'const mergeEngine', 'const render', 'const input', 'const GameState']
     .every(marker => js.includes(marker)));
+
+console.log('\n--- Phase 29: волна не роняет партию ---');
+
+// Регрессия: позиция из реальной партии (замер поймал её на seed 114 у бота
+// sloppy). Волна обходит очередь по ячейкам и сразу снимает блоки с соседей,
+// поэтому верх соседа успевает смениться прямо посреди планирования:
+//   1) центр «1,-1» собирает блок из «2,-1» — группа уходит в план;
+//   2) центр «2,-2» снимает у «1,-2» верхние тройки, и у той открываются нули;
+//   3) центр «1,-2» — теперь тоже с нулём наверху — забирает весь блок «1,-1»,
+//      и та остаётся без стопки;
+//   4) commitWave доливает фишки в «1,-1» — раньше здесь партия падала с
+//      «Cannot read properties of null».
+setBoard({
+  '1,-1': rep(0, 6),
+  '2,-1': rep(0, 2),
+  '1,-2': [0, 0, 3, 3],
+  '2,-2': [4, 4, 3, 3, 3, 3]
+});
+const tilesOnBoard = () => {
+  let n = 0;
+  GameState.cells.forEach(c => { if (c.stack) n += c.stack.tiles.length; });
+  return n;
+};
+const tilesBefore = tilesOnBoard();
+let waveCrash = null;
+let waveRes = null;
+try {
+  waveRes = mergeEngine.resolveWave(GameState, [cell('1,-1'), cell('2,-2'), cell('1,-2')]);
+} catch (e) {
+  waveCrash = e.message;
+}
+check('волна не роняет партию, когда цель успела опустеть',
+  waveCrash === null, waveCrash || '');
+check('волна довела цепочку до сгорания', waveRes && waveRes.totalPoints > 0,
+  waveRes ? 'очков ' + waveRes.totalPoints : 'волна не отработала');
+check('фишки не появились из ниоткуда: сколько ушло, столько и сгорело',
+  tilesOnBoard() === tilesBefore - CONFIG.merge.thresholdSteps[0].threshold,
+  tilesOnBoard() + ' из ' + tilesBefore);
+check('пустых стопок на доске не осталось', (() => {
+  let ok = true;
+  GameState.cells.forEach(c => { if (c.stack && !c.stack.tiles.length) ok = false; });
+  return ok;
+})());
+check('у каждой стопки на доске есть адрес ячейки', (() => {
+  let ok = true;
+  GameState.cells.forEach(c => {
+    if (c.stack && (!c.stack.cell || c.stack.cell.q !== c.q || c.stack.cell.r !== c.r)) ok = false;
+  });
+  return ok;
+})());
 
 console.log('\n--- Phase 28: растущий порог сгорания ---');
 
