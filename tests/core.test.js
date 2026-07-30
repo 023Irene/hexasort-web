@@ -115,7 +115,7 @@ js += '\nmodule.exports = { CONFIG, Platform, Audio, hexMath, generators, mergeE
   ' input, restart, updateActiveColors, renderGameToText, radiusForScore, growBoardIfNeeded,' +
   ' resetCamera, nearestSnapAngle, snapRotation, THEMES, applyTheme, updateMusicTension,' +
   ' openSettings, closeSettings, applySettings, persistSettings,' +
-  ' I18N, t, setLang, detectLang };';
+  ' I18N, t, setLang, detectLang, layoutUi, canvasHeightFor, captureUiBase };';
 const mod = { exports: {} };
 new Function('module', 'localStorage', 'requestAnimationFrame', 'document', 'performance',
   'setTimeout', 'window', 'location', 'AudioContext', 'setInterval', 'clearInterval',
@@ -126,7 +126,8 @@ const { CONFIG, Platform, Audio, hexMath, generators, mergeEngine, GameState, re
   updateActiveColors, renderGameToText, radiusForScore, growBoardIfNeeded,
   resetCamera, nearestSnapAngle, snapRotation, THEMES, applyTheme,
   updateMusicTension, openSettings, closeSettings, applySettings,
-  persistSettings, I18N, t, setLang, detectLang } = mod.exports;
+  persistSettings, I18N, t, setLang, detectLang,
+  layoutUi, canvasHeightFor, captureUiBase } = mod.exports;
 
 // Звук между проверками надо гасить: журнал общий, а троттлинг помнит прошлый вызов
 const audioReset = () => { audioLog.length = 0; Audio.lastAt = {}; };
@@ -1769,16 +1770,17 @@ restart();
 // 8г. слои стопки растут вверх ЭКРАНА, а не вбок вместе с поворотом поля
 // шпион ставится ПОСЛЕ подготовки доски: setBoard перерисовывает кадр целиком,
 // и в него попали бы ещё и стопки из руки
+// Шпион стоит на render.drawTile: с Phase 24 фишка не рисуется темой напрямую,
+// а копируется из спрайта, и это единственная точка, через которую идут все фишки
 const spyTiles = (angleDeg) => {
-  const active = THEMES[themeNames[0]];
   applyTheme(themeNames[0]);
   setBoard({ '2,-2': rep(0, 4) });
   GameState.camera.rotation = rad(angleDeg);
   const seen = [];
-  const original = active.tile;
-  active.tile = (ctx, x, y) => { seen.push({ x, y }); };
+  const original = render.drawTile;
+  render.drawTile = (x, y) => { seen.push({ x, y }); };
   render.drawStacks(GameState);
-  active.tile = original;
+  render.drawTile = original;
   return seen;
 };
 [0, 60, 180].forEach(angleDeg => {
@@ -2305,6 +2307,114 @@ check('все секции спеки §14 на месте',
   ['const CONFIG', 'const I18N', 'const Platform', 'const Audio', 'const hexMath',
     'const generators', 'const mergeEngine', 'const render', 'const input', 'const GameState']
     .every(marker => js.includes(marker)));
+
+console.log('\n--- Phase 24: телефон — спрайты фишек и вёрстка под экран ---');
+
+// 1. Спрайты фишек: фишка рисуется один раз и дальше копируется. Без этого
+// shadowBlur темы уходил на каждую из ~700 фишек кадра и клал телефон.
+restart();
+render.tileCache.clear();
+render.drawTile(100, 100, 40, CONFIG.colors.palette[0], true, 0);
+const afterFirst = render.tileCache.size;
+render.drawTile(200, 200, 40, CONFIG.colors.palette[0], true, 0);
+check('спрайт фишки строится один раз на ключ',
+  afterFirst === 1 && render.tileCache.size === 1);
+render.drawTile(100, 100, 40, CONFIG.colors.palette[1], true, 0);
+render.drawTile(100, 100, 40, CONFIG.colors.palette[0], false, 0);
+check('цвет и «верхняя ли» дают разные спрайты', render.tileCache.size === 3);
+// размер округляется: приземление и полёт масштабируют фишку каждый кадр,
+// и без округления кэш плодил бы спрайт на каждый пиксель
+const sizeBefore = render.tileCache.size;
+render.drawTile(100, 100, 41, CONFIG.colors.palette[0], true, 0);
+render.drawTile(100, 100, 39.4, CONFIG.colors.palette[0], true, 0);
+check('близкие размеры берут один спрайт', render.tileCache.size === sizeBefore);
+check('вариантов дрожания ровно столько, сколько в CONFIG', (() => {
+  render.tileCache.clear();
+  for (let seed = 0; seed < 40; seed++) {
+    render.drawTile(0, 0, 40, CONFIG.colors.palette[0], true, seed);
+  }
+  return render.tileCache.size === CONFIG.tile.spriteVariants;
+})());
+check('отрицательный seed не ломает выбор варианта', (() => {
+  const before = render.tileCache.size;
+  render.drawTile(0, 0, 40, CONFIG.colors.palette[0], true, -3);
+  return render.tileCache.size === before;
+})());
+render.drawTile(0, 0, 40, CONFIG.colors.palette[0], true, 0);
+applyTheme(themeNames[0]);
+check('смена темы сбрасывает спрайты', render.tileCache.size === 0);
+check('смена размера гекса сбрасывает спрайты', (() => {
+  hexMath.fitLayout(2);
+  render.drawTile(0, 0, 40, CONFIG.colors.palette[0], true, 0);
+  hexMath.fitLayout(4);
+  const cleared = render.tileCache.size === 0;
+  hexMath.fitLayout(GameState.radius);
+  return cleared;
+})());
+
+// 2. Высота канваса под форму окна: телефон 9:19.5 иначе играл в полосе
+const layoutCfg = CONFIG.ui.layout;
+const uiRowsBase = CONFIG.ui.settings.rowY.slice();   // снимок до переразметки
+check('без окна высота остаётся базовой', canvasHeightFor(0, 0) === layoutCfg.baseHeight);
+check('широкое окно не делает канвас ниже минимума',
+  canvasHeightFor(1920, 1080) === layoutCfg.minHeight);
+check('высокий экран телефона растягивает канвас',
+  canvasHeightFor(390, 844) > layoutCfg.baseHeight &&
+  canvasHeightFor(390, 844) <= layoutCfg.maxHeight);
+check('очень длинный экран упирается в потолок',
+  canvasHeightFor(300, 1200) === layoutCfg.maxHeight);
+
+// 3. Вёрстка под новую высоту: верх на месте, низ уезжает вниз, поле забирает прирост
+const tallHeight = layoutCfg.maxHeight;
+const scoreYBefore = CONFIG.ui.scoreY;
+const handYBefore = CONFIG.ui.handY;
+layoutUi(tallHeight);
+check('счёт остаётся привязан к верху', CONFIG.ui.scoreY === scoreYBefore);
+check('рука опустилась вместе с низом канваса', CONFIG.ui.handY > handYBefore);
+check('рука и бусты внутри канваса',
+  CONFIG.ui.handY < tallHeight && CONFIG.ui.boostBar.y + CONFIG.ui.boostBar.h < tallHeight);
+check('подсказка ниже поля и выше руки',
+  CONFIG.ui.hintY > CONFIG.ui.boardArea.bottom && CONFIG.ui.hintY < CONFIG.ui.handY);
+check('поле забрало прирост высоты',
+  CONFIG.ui.boardArea.bottom - CONFIG.ui.boardArea.top >
+  610 - CONFIG.ui.boardArea.top);
+// повторный вызов не должен складывать прирост сам с собой
+const handAtTall = CONFIG.ui.handY;
+layoutUi(tallHeight);
+check('повторная раскладка не сдвигает вёрстку второй раз',
+  CONFIG.ui.handY === handAtTall);
+check('строки настроек уехали к центру нового экрана',
+  CONFIG.ui.settings.rowY.every((y, i) => y > uiRowsBase[i]) &&
+  CONFIG.ui.settings.rowY[3] < render.restartButtonRect().y);
+
+// поле вписано в область при любом радиусе и на вытянутом экране
+[2, 3, 4].forEach(radius => {
+  const layout = hexMath.fitLayout(radius);
+  const halfHeight = Math.sqrt(3) / 2 * layout.size * (2 * radius + 1);
+  const halfWidth = layout.size * (1.5 * radius + 1);
+  check(`на вытянутом экране поле радиуса ${radius} внутри области`,
+    layout.centerY - halfHeight - CONFIG.tile.maxRise >= CONFIG.ui.boardArea.top - 0.5 &&
+    layout.centerY + halfHeight <= CONFIG.ui.boardArea.bottom + 0.5 &&
+    layout.centerX - halfWidth >= 0 && layout.centerX + halfWidth <= CONFIG.canvas.width);
+});
+check('на вытянутом экране гекс не мельче, чем на базовом',
+  hexMath.fitLayout(4).size >= 33);
+
+// рука по-прежнему ловит палец после переразметки
+restart();
+const tallSlotCenter = render.handSlotCenter(1);
+check('слот руки ловит палец на вытянутом экране',
+  input.hitHandSlot(GameState, tallSlotCenter.x, tallSlotCenter.y) === 1);
+
+// возвращаем базовую высоту: дальнейшие проверки считают вёрстку от 900
+layoutUi(layoutCfg.baseHeight);
+hexMath.fitLayout(GameState.radius);
+restart();
+check('возврат к базовой высоте восстанавливает вёрстку',
+  CONFIG.canvas.height === layoutCfg.baseHeight && CONFIG.ui.handY === handYBefore);
+
+// 4. Замер кадра — инструмент разработки, по умолчанию выключен
+check('замер кадра по умолчанию выключен', render.fpsMeter.on === false);
 
 // Проверки рейтинга вынесены в конец и выполняются асинхронно: fetchLeaderboard
 // возвращает промис, а в Node он резолвится не раньше следующего микротаска.

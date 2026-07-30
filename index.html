@@ -5,7 +5,9 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>HexaSort Web</title>
 <style>
-  /* Канвас по центру окна, масштаб с сохранением пропорций 720x900 */
+  /* Канвас по центру окна. Пропорции больше не заданы в CSS: логическую высоту
+     ставит layoutUi() по форме окна (Phase 24), иначе на телефоне 9:19.5 игра
+     шла в полосе посреди экрана. Браузер берёт пропорцию из атрибутов канваса. */
   html, body {
     height: 100%;
     margin: 0;
@@ -16,10 +18,13 @@
     display: flex;
     align-items: center;
     justify-content: center;
+    box-sizing: border-box;
+    /* вырез и «шторка» телефона: кнопки не должны уезжать под них */
+    padding: env(safe-area-inset-top) env(safe-area-inset-right)
+             env(safe-area-inset-bottom) env(safe-area-inset-left);
   }
   canvas {
     display: block;
-    aspect-ratio: 720 / 900;
     width: auto;
     height: auto;
     max-width: 100%;
@@ -348,6 +353,11 @@ const CONFIG = {
     cellStroke: '#34495E',
     text: '#ECF0F1',
     textDim: '#7F8C9A',
+    // Вёрстка под форму окна (Phase 24). Ширина канваса всегда 720 — от неё
+    // зависит вся горизонтальная разметка, — а высота берётся из пропорций окна
+    // и зажимается в коридор. Все вертикальные числа ниже заданы для baseHeight;
+    // прирост высоты layoutUi() отдаёт полю и опускает руку с бустами к низу.
+    layout: { baseHeight: 900, minHeight: 900, maxHeight: 1560 },
     // вертикальный коридор, в который вписывается поле любого радиуса
     boardArea: { top: 90, bottom: 610, sideMargin: 20 },
     scoreY: 62,
@@ -404,6 +414,14 @@ const CONFIG = {
                              // столько же резервируется над полем, чтобы высокие
                              // стопки не срезались верхней границей
     maxVisibleLayers: 12,    // защита от «небоскрёбов» при больших блоках
+    // Фишка рисуется один раз в спрайт и дальше копируется (Phase 24): тень с
+    // размытием на каждой из ~700 фишек кадра клала телефон. Вариантов дрожания
+    // края восемь — этого хватает, чтобы соседние фишки не выглядели штампом.
+    spriteVariants: 4,
+    spritePad: 10,           // запас в спрайте под тень: она выходит за контур
+    spriteStep: 6,           // размер округляется до кратного: приземление и полёт
+                             // масштабируют фишку каждый кадр, и без округления
+                             // кэш плодил бы спрайт на каждый пиксель
     strokeWidth: 2,
     shadeStroke: -0.28,      // обводка фишки на 1-2 тона темнее заливки
     shadeSide: -0.18         // бок фишки (нижние слои) чуть темнее
@@ -1416,6 +1434,10 @@ const hexMath = {
       availHeight / (Math.sqrt(3) * (2 * radius + 1))
     );
     const halfHeight = Math.sqrt(3) / 2 * size * (2 * radius + 1);
+    // размер гекса сменился — спрайты прежнего размера больше не понадобятся
+    if (Math.abs(size - hexMath.layout.size) > 0.01 && render.tileCache) {
+      render.tileCache.clear();
+    }
     hexMath.layout = {
       size,
       centerX: CONFIG.canvas.width / 2,
@@ -1905,6 +1927,44 @@ const render = {
     return Math.max(0, index - (total - visible)) * step;
   },
 
+  // Спрайт фишки (Phase 24). THEME.tile() ставит тень с размытием — самую дорогую
+  // операцию Canvas 2D, — а кадр рисует до 61 ячейки на 12 слоёв. Рисуем фишку один
+  // раз в offscreen и дальше копируем; стиль по-прежнему знает только тема.
+  // Кэш той же природы, что backgroundCache: сбрасывается в applyTheme и при смене
+  // размера гекса (fitLayout) — размер входит в ключ, но копить мусор незачем.
+  tileCache: new Map(),
+  tileSprite(color, isTop, variant, size) {
+    const key = color + '|' + (isTop ? 1 : 0) + '|' + variant + '|' + Math.round(size);
+    let sprite = render.tileCache.get(key);
+    if (sprite) return sprite;
+    const half = Math.ceil(size + CONFIG.tile.spritePad);
+    const buffer = document.createElement('canvas');
+    buffer.width = half * 2;
+    buffer.height = half * 2;
+    const bufferCtx = buffer.getContext('2d');
+    const previous = render.ctx;
+    render.ctx = bufferCtx;                 // тема рисует через render.*
+    THEME.tile(bufferCtx, half, half, size, color, isTop, variant);
+    render.ctx = previous;
+    sprite = { canvas: buffer, half };
+    render.tileCache.set(key, sprite);
+    return sprite;
+  },
+
+  // Одна фишка с центром в (x, y) — единственная точка, через которую идут все
+  // фишки игры: стопки на поле, рука, перетаскивание и летящие в волне.
+  drawTile(x, y, size, color, isTop, seed) {
+    const t = CONFIG.tile;
+    const variants = t.spriteVariants;
+    const variant = ((Math.round(seed || 0) % variants) + variants) % variants;
+    // спрайт строится в округлённом размере, а до нужного дотягивается drawImage:
+    // разница не больше половины шага и на глаз незаметна
+    const baseSize = Math.max(t.spriteStep, Math.round(size / t.spriteStep) * t.spriteStep);
+    const sprite = render.tileSprite(color, isTop, variant, baseSize);
+    const half = sprite.half * (size / baseSize);
+    render.ctx.drawImage(sprite.canvas, x - half, y - half, half * 2, half * 2);
+  },
+
   drawStack(stack, cx, cy, cellSize, seed, rotation) {
     const ctx = render.ctx;
     const t = CONFIG.tile;
@@ -1924,8 +1984,8 @@ const render = {
         ctx.rotate(angle);
         ctx.translate(-cx, -y);
       }
-      // саму фишку рисует активная тема (Phase 12)
-      THEME.tile(ctx, cx, y, size, color, isTop, (seed || 0) + i * 5);
+      // саму фишку рисует активная тема (Phase 12), но через кэш спрайтов (Phase 24)
+      render.drawTile(cx, y, size, color, isTop, (seed || 0) + i * 5);
       if (angle) ctx.restore();
     }
   },
@@ -2187,7 +2247,7 @@ const render = {
         ctx.rotate(rotation + lift * a.flowFlutter * (i % 2 ? -1 : 1));
         const grow = 1 + lift * a.flowLift;
         ctx.scale(grow, grow);
-        THEME.tile(ctx, 0, 0, tileSize, color, i === f.count - 1,
+        render.drawTile(0, 0, tileSize, color, i === f.count - 1,
           f.from.q * 31 + f.from.r * 57 + i * 5);
         ctx.restore();
       }
@@ -2801,6 +2861,30 @@ const render = {
     ctx.drawImage(render.backgroundCache, 0, 0);
   },
 
+  // Замер кадра (Phase 24), включается адресом `?fps=1`. Инструмент разработки:
+  // в обычной партии выключен и ничего не стоит. Непрерывный RAF нужен потому,
+  // что игра рисует по событию и в затишье кадров нет вовсе.
+  fpsMeter: { on: false, last: 0, times: [] },
+  drawFps() {
+    const meter = render.fpsMeter;
+    if (!meter.on) return;
+    const now = performance.now();
+    if (meter.last) {
+      meter.times.push(now - meter.last);
+      if (meter.times.length > 30) meter.times.shift();
+    }
+    meter.last = now;
+    if (!meter.times.length) return;
+    const avg = meter.times.reduce((sum, ms) => sum + ms, 0) / meter.times.length;
+    const ctx = render.ctx;
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'top';
+    ctx.font = 'bold 18px system-ui, sans-serif';
+    ctx.fillStyle = CONFIG.ui.text;
+    ctx.fillText(Math.round(1000 / avg) + ' fps  ' + avg.toFixed(1) + ' ms',
+      14, CONFIG.canvas.height - 32);
+  },
+
   // Полный кадр: сначала мир под трансформом камеры, затем экранный слой поверх
   drawAll(state) {
     const ctx = render.ctx;
@@ -2855,6 +2939,7 @@ const render = {
     if (state.isGameOver) render.drawGameOver(state);
     render.drawLeaderboard(state);
     render.drawSettings(state);      // настройки лежат поверх всего
+    render.drawFps();                // dev-замер, включается адресом ?fps=1
   }
 };
 
@@ -3638,6 +3723,71 @@ function applyTheme(name) {
   Object.assign(CONFIG.tile, THEME.geometry);
   CONFIG.colors.palette = THEME.palette;
   render.backgroundCache = null;             // фон перерисуется в новом стиле
+  render.tileCache.clear();                  // и фишки: спрайты запечены со старым
+  return true;
+}
+
+// --- Вёрстка под высоту экрана (Phase 24) -----------------------------------
+// Канвас держит логическую ширину 720, а высоту берёт из формы окна: на телефоне
+// 9:19.5 игра прежде шла в полосе посреди экрана, потому что пропорция 720×900
+// была прибита в CSS. Базовые числа CONFIG.ui заданы для layout.baseHeight,
+// поэтому снимок берётся один раз, а дальше всё считается от него — иначе
+// повторный resize складывал бы прирост сам с собой.
+let uiBase = null;
+function captureUiBase() {
+  const ui = CONFIG.ui;
+  uiBase = {
+    hintY: ui.hintY,
+    handY: ui.handY,
+    boostBarY: ui.boostBar.y,
+    boardBottom: ui.boardArea.bottom,
+    settingsTitleY: ui.settings.titleY,
+    settingsRowY: ui.settings.rowY.slice()
+  };
+}
+
+// Логическая высота канваса по размеру окна. Без окна (тесты, замер баланса)
+// остаётся базовая — существующие проверки не должны поехать.
+function canvasHeightFor(winWidth, winHeight) {
+  const L = CONFIG.ui.layout;
+  if (!winWidth || !winHeight) return L.baseHeight;
+  const wanted = Math.round(CONFIG.canvas.width * winHeight / winWidth);
+  return Math.max(L.minHeight, Math.min(L.maxHeight, wanted));
+}
+
+// Разложить интерфейс по новой высоте. Верх (счёт, рекорд, кошелёк, шестерёнка)
+// не двигается, низ (подсказка, рука, бусты) опускается на весь прирост, а поле
+// его забирает целиком — оно и есть главное на экране. Экраны-оверлеи считаются
+// от центра, поэтому им хватает половины.
+function layoutUi(height) {
+  if (!uiBase) captureUiBase();
+  const ui = CONFIG.ui;
+  const grow = height - ui.layout.baseHeight;
+  CONFIG.canvas.height = height;
+  ui.hintY = uiBase.hintY + grow;
+  ui.handY = uiBase.handY + grow;
+  ui.boostBar.y = uiBase.boostBarY + grow;
+  ui.boardArea.bottom = uiBase.boardBottom + grow;
+  ui.settings.titleY = uiBase.settingsTitleY + grow / 2;
+  ui.settings.rowY = uiBase.settingsRowY.map(y => y + grow / 2);
+}
+
+// Подогнать канвас под окно. Возвращает true, если что-то изменилось.
+function applyCanvasSize(canvas, state) {
+  const hasWindow = typeof window !== 'undefined';
+  const height = canvasHeightFor(hasWindow ? window.innerWidth : 0,
+    hasWindow ? window.innerHeight : 0);
+  if (height === CONFIG.canvas.height && canvas.height === height) return false;
+  layoutUi(height);
+  canvas.width = CONFIG.canvas.width;
+  canvas.height = height;
+  render.backgroundCache = null;      // фон рисуется во весь канвас
+  render.tileCache.clear();           // размер гекса сейчас сменится
+  if (state && state.cells) {
+    hexMath.fitLayout(state.radius);
+    hexMath.expandCells(state.cells, state.radius);   // пересчёт пикселей ячеек
+  }
+  requestRender();
   return true;
 }
 
@@ -3871,6 +4021,16 @@ function applySeedFromUrl() {
   if (match) generators.rng.seed(parseInt(match[1], 10));
 }
 
+// Замер кадра по адресу `?fps=1`. Кадры игра рисует по событию, поэтому для
+// замера их нужно заказывать самим. Именно setInterval, а не самоперезаводящийся
+// RAF: в тестах RAF выполняется синхронно и такой цикл ушёл бы в рекурсию —
+// та же ловушка, что и у планировщика музыки (Phase 18).
+function applyFpsFromUrl() {
+  if (!/[?&]fps=1/.test(location.search)) return;
+  render.fpsMeter.on = true;
+  setInterval(requestRender, 16);
+}
+
 function exposeQaHooks() {
   window.__GAME_STATE__ = GameState;
   window.render_game_to_text = renderGameToText;
@@ -3886,8 +4046,17 @@ function init() {
   applyTheme(Object.keys(THEMES)[0]);
   applySettings(Platform.loadSettings());   // громкости и язык до первого звука
   applySeedFromUrl();
+  applyFpsFromUrl();
+  captureUiBase();                        // снимок базовой вёрстки до правок
+  applyCanvasSize(canvas, GameState);       // высота канваса под форму окна
   restart();
   input.attach(canvas, GameState);
+  if (typeof window !== 'undefined' && window.addEventListener) {
+    // поворот экрана и смена размера окна перестраивают вёрстку без перезагрузки
+    const relayout = () => applyCanvasSize(canvas, GameState);
+    window.addEventListener('resize', relayout);
+    window.addEventListener('orientationchange', relayout);
+  }
   exposeQaHooks();
 }
 
