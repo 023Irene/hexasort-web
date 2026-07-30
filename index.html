@@ -179,7 +179,9 @@ const CONFIG = {
                floatMs: 820, floatRise: 86,     // всплывающее «+N очков»
                counterMs: 420,                  // счёт и кошелёк догоняют значение
                shakeMs: 260, shakeAmp: 9, shakeFromTiles: 15,
-               overlayFadeMs: 260 },
+               overlayFadeMs: 260,
+               pressMs: 140,        // отклик нажатия: кнопка вдавливается и отходит
+               pressScale: 0.94 },
   // Звук. Синтезируется кодом: внешних файлов в проекте быть не может (ADR-0001).
   // master: 0 глушит игру целиком, gain: 0 у голоса гасит один звук — как у juice.
   //
@@ -415,6 +417,10 @@ const CONFIG = {
                // настройки игрока одним ключом-объектом: их трое, и растить
                // хранилище по ключу на регулятор незачем
                settingsKey: 'hexasort_settings',
+               // Статистика за всё время (Phase 20): топ лучших партий и счётчики.
+               // Второй объект в хранилище после настроек — числовым ключам такое
+               // уже не уложить.
+               statsKey: 'hexasort_stats',
                // версия экономики: при её росте прежний рекорд несопоставим с новой
                // шкалой и сбрасывается один раз (ADR-0004)
                // версия 3 (Phase 23): в Phase 21 сменились и шкала прогрессии,
@@ -460,6 +466,17 @@ const CONFIG = {
                 toggleW: 84, toggleH: 40, toggleRadius: 20, toggleKnob: 15,
                 langW: 66, langH: 40, langGap: 12, langRadius: 10,
                 step: 0.05 },            // округление ползунка: 5 % на деление
+    // Экран статистики (Phase 20). Своих цветов нет — всё из палитры темы,
+    // поэтому контракт THEMES не меняется.
+    stats: { topRuns: 5,
+             titleY: 120,
+             listY: 220,          // заголовок «Лучшие партии»
+             rowStep: 40,         // шаг строки в списке лучших забегов
+             countersY: 500,      // блок счётчиков за всё время
+             counterStep: 38,
+             rankX: 210,          // ранг слева, счёт по центру, монеты справа
+             scoreX: 400,
+             coinsX: 520 },
     // панель бустов под рукой
     // Кнопки бустов: значок крупно, под ним цена. Подписей нет (Phase 23) —
     // действие объясняет сам значок, а при активном бусте ещё и подсказка под
@@ -542,7 +559,16 @@ const I18N = {
     hintMove: 'Выбери стопку, потом свободную ячейку',
     hintRemove: 'Выбери стопку, которую убрать',
     combo: 'Комбо ×',
-    newThreshold: 'Теперь нужно '
+    newThreshold: 'Теперь нужно ',
+    recordBeaten: 'Новый рекорд!',
+    stats: 'Статистика',
+    statsBest: 'Лучшие партии',
+    statsGames: 'Партий сыграно: ',
+    statsBurns: 'Сгораний всего: ',
+    statsBiggest: 'Самый крупный блок: ',
+    statsCombo: 'Самая длинная цепочка: ',
+    statsCoins: 'Монет заработано: ',
+    statsEmpty: 'Сыграй первую партию'
   },
   en: {
     hint: 'Place a stack next to the same colour',
@@ -573,7 +599,16 @@ const I18N = {
     hintMove: 'Pick a stack, then an empty cell',
     hintRemove: 'Pick a stack to remove',
     combo: 'Combo ×',
-    newThreshold: 'Now you need '
+    newThreshold: 'Now you need ',
+    recordBeaten: 'New best!',
+    stats: 'Stats',
+    statsBest: 'Best runs',
+    statsGames: 'Games played: ',
+    statsBurns: 'Total burns: ',
+    statsBiggest: 'Biggest block: ',
+    statsCombo: 'Longest chain: ',
+    statsCoins: 'Coins earned: ',
+    statsEmpty: 'Play your first run'
   }
 };
 
@@ -728,8 +763,22 @@ const Platform = {
     Platform.save(CONFIG.storage.settingsKey, JSON.stringify(values));
   },
   loadSettings() {
+    return Platform.loadJson(CONFIG.storage.settingsKey);
+  },
+
+  // Статистика за всё время (Phase 20) — второй объект в хранилище. Читается тем же
+  // путём, что настройки: битое значение даёт null, а умолчания решает вызывающий.
+  saveStats(values) {
+    Platform.save(CONFIG.storage.statsKey, JSON.stringify(values));
+  },
+  loadStats() {
+    return Platform.loadJson(CONFIG.storage.statsKey);
+  },
+
+  // Общее чтение JSON-объекта из хранилища
+  loadJson(key) {
     try {
-      const raw = localStorage.getItem(CONFIG.storage.settingsKey);
+      const raw = localStorage.getItem(key);
       const parsed = raw ? JSON.parse(raw) : null;
       return parsed && typeof parsed === 'object' ? parsed : null;
     } catch (e) {
@@ -1933,7 +1982,7 @@ const mergeEngine = {
   },
 
   // Сгорание: верхний блок дорос до порога — горит целиком (13 → горят 13)
-  burnIfReady(state, cell, waveNumber) {
+  burnIfReady(state, cell) {
     if (!cell.stack) return { burned: false };
     const run = mergeEngine.topRun(cell.stack);
     if (run.length < mergeEngine.thresholdFor(state.score)) return { burned: false };
@@ -1941,7 +1990,6 @@ const mergeEngine = {
     if (!cell.stack.tiles.length) cell.stack = null;
     return {
       burned: true, cell, color: run.color, count: run.length,
-      wave: waveNumber,                                  // нужен анимации, не очкам
       points: mergeEngine.burnPointsFor(run.length),
       coins: mergeEngine.burnCoinsFor(run.length)
     };
@@ -1989,7 +2037,7 @@ const mergeEngine = {
         mark(g.cell);
         g.flows.forEach(f => mark(f.from));   // сосед открыл следующий цвет
       }
-      const burn = mergeEngine.burnIfReady(state, g.cell, plan.wave);
+      const burn = mergeEngine.burnIfReady(state, g.cell);
       if (burn.burned) {
         burnPoints += burn.points;
         burnCoins += burn.coins;              // монета за каждую сгоревшую фишку
@@ -2355,10 +2403,12 @@ const render = {
     ctx.fillText(String(Math.round(state.scoreShown)), CONFIG.canvas.width / 2, ui.scoreY);
 
     ctx.textAlign = 'right';
-    ctx.fillStyle = ui.textDim;
+    // рекорд, побитый в этой партии, держится акцентным цветом до её конца
+    // (Phase 20): вспышка гаснет за секунду, а факт остаётся
+    ctx.fillStyle = state.recordBeaten ? ui.text : ui.textDim;
     ctx.font = '20px system-ui, sans-serif';
     // строка кончается левее шестерёнки настроек, поэтому край задан числом
-    const bestText = t('record') + state.best;
+    const bestText = t(state.recordBeaten ? 'newRecord' : 'record') + state.best;
     ctx.fillText(bestText, ui.bestX, ui.bestY);
     // кубок слева от строки: её ширина зависит от величины рекорда
     render.trophyIcon(ui.bestX - render.textWidth(bestText, 10) - ui.trophyGap,
@@ -2566,9 +2616,16 @@ const render = {
   },
 
   // Кнопка «Рейтинг» на оверлее конца — над кнопкой «Заново»
+  // Ряд над кнопкой «Заново» делят «Рейтинг» и «Статистика» (Phase 20):
+  // третьей строки оверлей не выдерживает — она наезжает на строку кошелька.
   leaderboardButtonRect() {
     const btn = render.restartButtonRect();
-    return { x: btn.x, y: btn.y - btn.h - 8, w: btn.w, h: btn.h - 12 };
+    const half = (btn.w - 10) / 2;
+    return { x: btn.x, y: btn.y - btn.h - 8, w: half, h: btn.h - 12 };
+  },
+  statsButtonRect() {
+    const rating = render.leaderboardButtonRect();
+    return { x: rating.x + rating.w + 10, y: rating.y, w: rating.w, h: rating.h };
   },
 
   // Экран рейтинга поверх оверлея конца партии
@@ -2701,21 +2758,52 @@ const render = {
     ctx.fillStyle = ui.textDim;
     ctx.fillText(t('wallet') + state.coins, W / 2, H / 2 + 58);
 
-    const rating = render.leaderboardButtonRect();
-    render.roundRectPath(rating.x, rating.y, rating.w, rating.h, ui.buttonRadius);
-    ctx.lineWidth = 2;
-    ctx.strokeStyle = ui.overlayText;
-    ctx.stroke();
-    ctx.fillStyle = ui.overlayText;
-    ctx.font = '20px system-ui, sans-serif';
-    ctx.fillText(t('leaderboard'), rating.x + rating.w / 2, rating.y + rating.h / 2 + 1);
+    const outlineButton = (rect, label) => render.withPress(state, label, rect, () => {
+      render.roundRectPath(rect.x, rect.y, rect.w, rect.h, ui.buttonRadius);
+      ctx.lineWidth = 2;
+      ctx.strokeStyle = ui.overlayText;
+      ctx.stroke();
+      ctx.fillStyle = ui.overlayText;
+      ctx.font = '18px system-ui, sans-serif';
+      ctx.fillText(label, rect.x + rect.w / 2, rect.y + rect.h / 2 + 1);
+    });
+    outlineButton(render.leaderboardButtonRect(), t('leaderboard'));
+    outlineButton(render.statsButtonRect(), t('stats'));
 
     const btn = render.restartButtonRect();
-    render.paperCard(btn.x, btn.y, btn.w, btn.h, ui.buttonRadius, ui.buttonFill);
-    ctx.fillStyle = ui.buttonText;
-    ctx.font = 'bold 26px system-ui, sans-serif';
-    ctx.fillText(t('restart'), btn.x + btn.w / 2, btn.y + btn.h / 2 + 1);
+    render.withPress(state, 'restart', btn, () => {
+      render.paperCard(btn.x, btn.y, btn.w, btn.h, ui.buttonRadius, ui.buttonFill);
+      ctx.fillStyle = ui.buttonText;
+      ctx.font = 'bold 26px system-ui, sans-serif';
+      ctx.fillText(t('restart'), btn.x + btn.w / 2, btn.y + btn.h / 2 + 1);
+    });
     ctx.globalAlpha = 1;
+  },
+
+  // Отклик нажатия (Phase 30): кнопка вдавливается и отходит. Ключ — что именно
+  // нажали, чтобы соседние кнопки не дёргались вместе с ней.
+  pressScaleFor(state, key) {
+    const press = state.fx && state.fx.press;
+    if (!press || press.key !== key) return 1;
+    const a = CONFIG.animation;
+    const t = Math.min(1, press.age / a.pressMs);
+    // вниз и обратно: sin даёт мягкий возврат без отдельной кривой
+    return 1 - (1 - a.pressScale) * Math.sin(Math.PI * t);
+  },
+
+  // Нарисовать содержимое кнопки вдавленным: масштаб вокруг её центра
+  withPress(state, key, rect, draw) {
+    const scale = render.pressScaleFor(state, key);
+    const ctx = render.ctx;
+    if (scale === 1) { draw(); return; }
+    const cx = rect.x + rect.w / 2;
+    const cy = rect.y + rect.h / 2;
+    ctx.save();
+    ctx.translate(cx, cy);
+    ctx.scale(scale, scale);
+    ctx.translate(-cx, -cy);
+    draw();
+    ctx.restore();
   },
 
   // Прямоугольник кнопки буста по индексу — нужен и отрисовке, и вводу
@@ -2736,6 +2824,13 @@ const render = {
       const rect = render.boostButtonRect(index);
       const active = state.boost && state.boost.kind === boost.kind;
       const affordable = state.coins >= boost.cost;
+      const press = render.pressScaleFor(state, 'boost:' + boost.kind);
+      if (press !== 1) {
+        ctx.save();
+        ctx.translate(rect.x + rect.w / 2, rect.y + rect.h / 2);
+        ctx.scale(press, press);
+        ctx.translate(-(rect.x + rect.w / 2), -(rect.y + rect.h / 2));
+      }
 
       // активный буст выделяется акцентной рамкой, обычный — только тенью
       render.paperCard(rect.x, rect.y, rect.w, rect.h, bar.radius,
@@ -2756,6 +2851,7 @@ const render = {
       ctx.fillStyle = affordable ? CONFIG.ui.text : CONFIG.ui.textDim;
       ctx.fillText(priceText, groupX + 20, rect.y + bar.priceY);
       ctx.globalAlpha = 1;
+      if (press !== 1) ctx.restore();
     });
   },
 
@@ -3066,6 +3162,72 @@ const render = {
       14, CONFIG.canvas.height - 32);
   },
 
+  // Экран статистики (Phase 20): лучшие партии и счётчики за всё время.
+  // Глобального рейтинга здесь нет — это отдельный экран и фича Яндекс-версии.
+  drawStats(state) {
+    const screen = state.stats;
+    if (!screen || !screen.open) return;
+    const ctx = render.ctx;
+    const ui = CONFIG.ui;
+    const cfg = ui.stats;
+    const W = CONFIG.canvas.width;
+
+    ctx.globalAlpha = screen.t === undefined ? 1 : screen.t;
+    ctx.fillStyle = ui.overlayBg;
+    ctx.fillRect(0, 0, W, CONFIG.canvas.height);
+
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = ui.overlayText;
+    ctx.font = 'bold 34px system-ui, sans-serif';
+    ctx.fillText(t('stats'), W / 2, cfg.titleY);
+
+    const stats = screen.data || emptyStats();
+    const runs = stats.best || [];
+
+    ctx.font = '22px system-ui, sans-serif';
+    ctx.fillStyle = ui.textDim;
+    ctx.fillText(t('statsBest'), W / 2, cfg.listY - 40);
+
+    if (!runs.length) {
+      ctx.font = '20px system-ui, sans-serif';
+      ctx.fillText(t('statsEmpty'), W / 2, cfg.listY + 20);
+    } else {
+      runs.forEach((run, i) => {
+        const y = cfg.listY + i * cfg.rowStep;
+        ctx.textAlign = 'left';
+        ctx.fillStyle = i === 0 ? ui.overlayText : ui.textDim;
+        ctx.font = (i === 0 ? 'bold ' : '') + '22px system-ui, sans-serif';
+        ctx.fillText(String(i + 1), cfg.rankX, y);
+        ctx.textAlign = 'right';
+        ctx.fillText(String(run.score), cfg.scoreX, y);
+        // монеты той партии — значком, тем же, что в кошельке
+        render.coinIcon(cfg.coinsX, y, ui.coinRadius);
+        ctx.textAlign = 'left';
+        ctx.fillStyle = i === 0 ? ui.overlayText : ui.textDim;
+        ctx.fillText(String(run.coins || 0), cfg.coinsX + ui.coinRadius + 8, y);
+      });
+    }
+
+    ctx.textAlign = 'center';
+    ctx.fillStyle = ui.textDim;
+    ctx.font = '20px system-ui, sans-serif';
+    [[t('statsGames'), stats.games],
+     [t('statsBurns'), stats.burns],
+     [t('statsBiggest'), stats.biggestBlock],
+     [t('statsCombo'), stats.longestCombo],
+     [t('statsCoins'), stats.coins]].forEach((row, i) => {
+      ctx.fillText(row[0] + row[1], W / 2, cfg.countersY + i * cfg.counterStep);
+    });
+
+    const back = render.restartButtonRect();
+    render.paperCard(back.x, back.y, back.w, back.h, ui.buttonRadius, ui.buttonFill);
+    ctx.fillStyle = ui.buttonText;
+    ctx.font = 'bold 24px system-ui, sans-serif';
+    ctx.fillText(t('back'), back.x + back.w / 2, back.y + back.h / 2 + 1);
+    ctx.globalAlpha = 1;
+  },
+
   // Полный кадр: сначала мир под трансформом камеры, затем экранный слой поверх
   drawAll(state) {
     const ctx = render.ctx;
@@ -3119,6 +3281,7 @@ const render = {
     render.drawSettingsButton(state);
     if (state.isGameOver) render.drawGameOver(state);
     render.drawLeaderboard(state);
+    render.drawStats(state);
     render.drawSettings(state);      // настройки лежат поверх всего
     render.drawFps();                // dev-замер, включается адресом ?fps=1
   }
@@ -3135,6 +3298,16 @@ const input = {
       x: (event.clientX - rect.left) * (CONFIG.canvas.width / rect.width),
       y: (event.clientY - rect.top) * (CONFIG.canvas.height / rect.height)
     };
+  },
+
+  // Отклик нажатия (Phase 30): помечаем, какую кнопку нажали, и заводим цикл juice.
+  // Ввод при этом не блокируется — эффект живёт своей жизнью и гаснет сам.
+  // Возвращает ключ нажатой кнопки: в тестах сам эффект не поймать — часы там
+  // прыгают на секунду за кадр, и он гаснет в том же вызове (как у announceThreshold)
+  pressButton(state, key) {
+    state.fx.press = { key, age: 0 };
+    startFx(state);
+    return key;
   },
 
   // Какой слот руки под точкой. Зона слота — прямоугольник вокруг гекса,
@@ -3398,6 +3571,14 @@ const input = {
         return;
       }
 
+      // экран статистики — по тем же правилам, что и рейтинг: только «Назад»
+      if (state.stats && state.stats.open) {
+        if (input.hitRect(render.restartButtonRect(), point.x, point.y)) {
+          closeStats(state);
+        }
+        return;
+      }
+
       // экран рейтинга поверх всего: реагирует только кнопка «Назад»
       if (state.leaderboard && state.leaderboard.open) {
         if (input.hitRect(render.restartButtonRect(), point.x, point.y)) {
@@ -3415,10 +3596,19 @@ const input = {
       }
       if (state.isGameOver) {
         if (input.hitRect(render.leaderboardButtonRect(), point.x, point.y)) {
+          input.pressButton(state, t('leaderboard'));
           openLeaderboard(state);
           return;
         }
-        if (input.hitRect(render.restartButtonRect(), point.x, point.y)) restart();
+        if (input.hitRect(render.statsButtonRect(), point.x, point.y)) {
+          input.pressButton(state, t('stats'));
+          openStats(state);
+          return;
+        }
+        if (input.hitRect(render.restartButtonRect(), point.x, point.y)) {
+          input.pressButton(state, 'restart');
+          restart();
+        }
         return;
       }
       if (input.hitRect(render.resetCameraButtonRect(), point.x, point.y)) {
@@ -3430,6 +3620,7 @@ const input = {
       const boostIndex = CONFIG.boosts.findIndex((boost, i) =>
         input.hitRect(render.boostButtonRect(i), point.x, point.y));
       if (boostIndex !== -1) {
+        input.pressButton(state, 'boost:' + CONFIG.boosts[boostIndex].kind);
         input.toggleBoost(state, CONFIG.boosts[boostIndex].kind);
         requestRender();
         return;
@@ -3590,6 +3781,10 @@ const input = {
         closeSettings(state);
         return;
       }
+      if (event.code === 'Escape' && state.stats && state.stats.open) {
+        closeStats(state);
+        return;
+      }
       if (event.code === 'Escape' && state.boost) {
         state.boost = null;
         requestRender();
@@ -3654,7 +3849,13 @@ const GameState = {
   handAnim: null,      // смена руки бустом «пересдача»: {old, t}
   // Juice (Phase 15). Живёт в отдельном цикле: эффекты переживают конец волны,
   // а логика игры на них не смотрит.
-  fx: { particles: [], floats: [], shake: null },
+  fx: { particles: [], floats: [], shake: null, press: null },
+  // Статистика (Phase 20). Счётчики копятся за партию и в конце добавляются к
+  // сохранённым; recordBeaten поднимается один раз — иначе вспышка мигала бы
+  // на каждом ходу после рекорда.
+  recordBeaten: false,
+  runStats: { burns: 0, biggestBlock: 0, longestCombo: 0, coins: 0 },
+  stats: null,         // экран статистики: {open, t}
   scoreShown: 0,       // счёт и кошелёк на экране догоняют настоящие значения
   coinsShown: 0,
   overlayT: 1          // проявление оверлея конца партии
@@ -3688,10 +3889,11 @@ function approach(shown, target, dt, ms) {
 
 function fxAlive(state) {
   return state.fx.particles.length > 0 || state.fx.floats.length > 0 ||
-    state.fx.shake !== null ||
+    state.fx.shake !== null || !!state.fx.press ||
     state.scoreShown !== state.score || state.coinsShown !== state.coins ||
     state.overlayT < 1 ||
     (state.leaderboard && state.leaderboard.open && state.leaderboard.t < 1) ||
+    (state.stats && state.stats.open && state.stats.t < 1) ||
     (state.settings && state.settings.open && state.settings.t < 1);
 }
 
@@ -3700,12 +3902,17 @@ function stepFx(state, dt) {
   state.fx.particles = state.fx.particles.filter(p => (p.age += dt) < a.particleMs);
   state.fx.floats = state.fx.floats.filter(f => (f.age += dt) < a.floatMs);
   if (state.fx.shake && (state.fx.shake.age += dt) >= a.shakeMs) state.fx.shake = null;
+  if (state.fx.press && (state.fx.press.age += dt) >= a.pressMs) state.fx.press = null;
   state.scoreShown = approach(state.scoreShown, state.score, dt, a.counterMs);
   state.coinsShown = approach(state.coinsShown, state.coins, dt, a.counterMs);
   if (state.overlayT < 1) state.overlayT = Math.min(1, state.overlayT + dt / a.overlayFadeMs);
   const board = state.leaderboard;
   if (board && board.open && board.t < 1) {
     board.t = Math.min(1, board.t + dt / a.overlayFadeMs);
+  }
+  const stats = state.stats;
+  if (stats && stats.open && stats.t < 1) {
+    stats.t = Math.min(1, stats.t + dt / a.overlayFadeMs);
   }
   const settings = state.settings;
   if (settings && settings.open && settings.t < 1) {
@@ -3795,6 +4002,7 @@ function waveCommit(state, plan, ctx) {
   const res = mergeEngine.commitWave(state, plan, ctx);
   state.score += res.burnPoints;
   if (res.burnCoins) addCoins(state, res.burnCoins);
+  collectRunStats(state, res);      // счётчики партии (Phase 20)
   updateBest(state);
   updateActiveColors(state);
   render.drawAll(state);
@@ -3870,10 +4078,13 @@ function finishWave(state) {
   // поле растёт до проверки проигрыша: иначе партия закончилась бы за миг до того,
   // как счёт открыл новое кольцо
   const grew = growBoardIfNeeded(state);
-  // рука опустела полностью → новая раздача (уже с учётом освободившихся ячеек)
+  // рука опустела полностью → новая раздача (уже с учётом освободившихся ячеек).
+  // Новые стопки падают в слоты тем же приёмом, что и у буста «Пересдача»:
+  // раньше рука появлялась скачком (бэклог полировки Phase 15).
   if (state.hand.slots.every(s => s === null)) {
     generators.dealHand(state);
     Audio.deal();
+    state.handAnim = { old: [null, null, null], t: 0 };
   }
   updateBest(state);
   announceThreshold(state);    // порог сгорания мог вырасти — об этом надо сказать
@@ -3881,11 +4092,17 @@ function finishWave(state) {
   updateMusicTension(state);   // после checkGameOver: на проигрыше фон успокаивается
 
   if (grew) {
-    // новое кольцо проявляется, ввод до конца анимации заблокирован
+    // новое кольцо проявляется, ввод до конца анимации заблокирован.
+    // Падение руки при этом не анимируем: две анимации разом читаются как каша
+    state.handAnim = null;
     Audio.ring();
     animate(state, CONFIG.animation.ringGrowMs,
       (t) => { state.newRing.t = render.ease.outCubic(t); },
       () => { state.newRing = null; state.isAnimating = false; requestRender(); });
+  } else if (state.handAnim) {
+    animate(state, CONFIG.animation.handSwapMs,
+      (t) => { state.handAnim.t = t; },
+      () => { state.handAnim = null; state.isAnimating = false; requestRender(); });
   } else {
     state.isAnimating = false;
     requestRender();
@@ -4061,8 +4278,21 @@ function updateActiveColors(state) {
 // Рекорд — переживает сессию. Пишем сразу через Platform.
 function updateBest(state) {
   if (state.score <= state.best) return;
+  // Момент побития рекорда — единственная мета-прогрессия в игре, и раньше игрок
+  // узнавал о нём только в конце партии (Phase 20). Вспышка показывается один раз:
+  // дальше рекорд растёт с каждым сгоранием, и она мигала бы без остановки.
+  const first = !state.recordBeaten && state.best > 0;
   state.best = state.score;
   Platform.saveBest(state.best);
+  if (!first) return false;
+  state.recordBeaten = true;
+  const center = state.cells.get(hexMath.key(0, 0));
+  if (center) {
+    state.fx.floats.push({ cell: center, age: 0, accent: true, text: t('recordBeaten') });
+    startFx(state);
+  }
+  Audio.ring();
+  return true;
 }
 
 // Кошелёк тоже переживает сессию: монеты копятся между партиями (ADR-0004)
@@ -4095,11 +4325,50 @@ function updateMusicTension(state) {
 }
 
 // Проигрыш: на поле нет свободных ячеек, а в руке ещё есть стопки
+// Счётчики партии копятся по ходу волны, а в хранилище уходят один раз — в конце
+// партии (Phase 20). Писать в localStorage на каждое сгорание незачем.
+function collectRunStats(state, res) {
+  const run = state.runStats;
+  run.burns += res.burns.length;
+  run.coins += res.burnCoins;
+  res.burns.forEach(burn => {
+    if (burn.count > run.biggestBlock) run.biggestBlock = burn.count;
+  });
+  if (res.combo > run.longestCombo) run.longestCombo = res.combo;
+}
+
+// Умолчания статистики: хранилища может не быть вовсе, а битый JSON даёт null
+function emptyStats() {
+  return { games: 0, burns: 0, biggestBlock: 0, longestCombo: 0, coins: 0, best: [] };
+}
+function loadStats() {
+  const stored = Platform.loadStats();
+  return Object.assign(emptyStats(), stored || {});
+}
+
+// Итог партии добавляется к сохранённому: топ лучших забегов плюс счётчики за всё
+// время. Список режется по CONFIG.ui.stats.topRuns — на экран больше и не влезет.
+function saveRunStats(state) {
+  const stats = loadStats();
+  const run = state.runStats;
+  stats.games++;
+  stats.burns += run.burns;
+  stats.coins += run.coins;
+  if (run.biggestBlock > stats.biggestBlock) stats.biggestBlock = run.biggestBlock;
+  if (run.longestCombo > stats.longestCombo) stats.longestCombo = run.longestCombo;
+  stats.best = (stats.best || []).concat([{ score: state.score, coins: run.coins }])
+    .sort((a, b) => b.score - a.score)
+    .slice(0, CONFIG.ui.stats.topRuns);
+  Platform.saveStats(stats);
+  return stats;
+}
+
 function checkGameOver(state) {
   if (generators.freeCells(state).length > 0) return;
   if (state.hand.slots.every(s => s === null)) return;
   state.isGameOver = true;
   state.overlayT = 0;                     // оверлей проявляется, а не выпрыгивает
+  saveRunStats(state);                    // итог партии в статистику (Phase 20)
   Platform.gameplay(false);               // партия кончилась — платформа должна знать
   // признак рекорда считается так же, как в оверлее: updateBest уже отработал
   Audio.over(state.score >= state.best && state.score > 0);
@@ -4109,6 +4378,22 @@ function checkGameOver(state) {
 }
 
 // Экран рейтинга: данные тянутся при открытии, ошибки не ломают игру (ADR-0005)
+// Экран статистики (Phase 20). Данные читаются один раз при открытии: в партии
+// они не меняются, а хранилище дёргать на каждый кадр незачем.
+function openStats(state) {
+  state.stats = { open: true, t: 0, data: loadStats() };
+  Platform.gameplay(false);
+  startFx(state);
+  requestRender();
+  return state.stats;
+}
+
+function closeStats(state) {
+  state.stats = null;
+  Platform.gameplay(!state.isGameOver);
+  requestRender();
+}
+
 function openLeaderboard(state) {
   state.leaderboard = { open: true, loading: true, available: false, entries: [],
                         playerRank: 0, t: 0 };
@@ -4179,6 +4464,9 @@ function restart() {
   GameState.showHint = true;
   GameState.rescuesUsed = 0;       // лимит выручки — на партию, а не на сессию
   GameState.rescuedLastDeal = false;
+  GameState.recordBeaten = false;
+  GameState.runStats = { burns: 0, biggestBlock: 0, longestCombo: 0, coins: 0 };
+  GameState.stats = null;
   GameState.burnThreshold = mergeEngine.thresholdFor(0);
   GameState.drag = null;
   GameState.boost = null;
@@ -4194,7 +4482,7 @@ function restart() {
   GameState.boostAnim = null;
   GameState.handAnim = null;
   // эффекты гасим и счётчики ставим сразу: новая партия не должна доезжать до нуля
-  GameState.fx = { particles: [], floats: [], shake: null };
+  GameState.fx = { particles: [], floats: [], shake: null, press: null };
   GameState.scoreShown = GameState.score;
   GameState.coinsShown = GameState.coins;
   GameState.overlayT = 1;

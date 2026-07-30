@@ -116,7 +116,8 @@ js += '\nmodule.exports = { CONFIG, Platform, Audio, hexMath, generators, mergeE
   ' resetCamera, nearestSnapAngle, snapRotation, THEMES, applyTheme, updateMusicTension,' +
   ' openSettings, closeSettings, applySettings, persistSettings,' +
   ' I18N, t, setLang, detectLang, layoutUi, canvasHeightFor, captureUiBase,' +
-  ' announceThreshold };';
+  ' announceThreshold, openStats, closeStats, loadStats, saveRunStats, emptyStats,' +
+  ' updateBest };';
 const mod = { exports: {} };
 new Function('module', 'localStorage', 'requestAnimationFrame', 'document', 'performance',
   'setTimeout', 'window', 'location', 'AudioContext', 'setInterval', 'clearInterval',
@@ -128,7 +129,8 @@ const { CONFIG, Platform, Audio, hexMath, generators, mergeEngine, GameState, re
   resetCamera, nearestSnapAngle, snapRotation, THEMES, applyTheme,
   updateMusicTension, openSettings, closeSettings, applySettings,
   persistSettings, I18N, t, setLang, detectLang,
-  layoutUi, canvasHeightFor, captureUiBase, announceThreshold } = mod.exports;
+  layoutUi, canvasHeightFor, captureUiBase, announceThreshold,
+  openStats, closeStats, loadStats, saveRunStats, emptyStats, updateBest } = mod.exports;
 
 // Звук между проверками надо гасить: журнал общий, а троттлинг помнит прошлый вызов
 const audioReset = () => { audioLog.length = 0; Audio.lastAt = {}; };
@@ -1280,7 +1282,7 @@ GameState.boostAnim = null;
 // 2. «убрать» рассыпает стопку осколками, а не гасит её молча
 restart();
 GameState.coins = 500;
-GameState.fx = { particles: [], floats: [], shake: null };
+GameState.fx = { particles: [], floats: [], shake: null, press: null };
 const removeCell = cell('1,-1');
 removeCell.stack = { tiles: rep(0, 4), cell: { q: 1, r: -1 } };
 input.toggleBoost(GameState, 'remove');
@@ -1297,7 +1299,7 @@ input.applyBoostTo(GameState, removeCell);
 check('буст «убрать» очистил ячейку', removeCell.stack === null);
 check('буст «убрать» рассыпал стопку на осколки',
   scattered === 4 * CONFIG.animation.boostScatterPerTile, 'осколков ' + scattered);
-GameState.fx = { particles: [], floats: [], shake: null };
+GameState.fx = { particles: [], floats: [], shake: null, press: null };
 
 // 3. комбо: цепочка из двух сгораний платит бонусом, из одного — нет
 restart();
@@ -1357,7 +1359,7 @@ const shakeStart = Math.abs(render.shakeOffset(GameState).x);
 GameState.fx.shake = { age: CONFIG.animation.shakeMs };
 check('тряска затухает к концу',
   Math.abs(render.shakeOffset(GameState).x) <= shakeStart);
-GameState.fx = { particles: [], floats: [], shake: null };
+GameState.fx = { particles: [], floats: [], shake: null, press: null };
 check('без тряски смещение нулевое',
   render.shakeOffset(GameState).x === 0 && render.shakeOffset(GameState).y === 0);
 
@@ -2451,6 +2453,120 @@ check('все секции спеки §14 на месте',
   ['const CONFIG', 'const I18N', 'const Platform', 'const Audio', 'const hexMath',
     'const generators', 'const mergeEngine', 'const render', 'const input', 'const GameState']
     .every(marker => js.includes(marker)));
+
+console.log('\n--- Phase 20: рекорды и статистика ---');
+
+// 1. вспышка рекорда показывается один раз за партию
+restart();
+GameState.best = 100;
+GameState.score = 150;
+GameState.fx.floats.length = 0;
+check('побитие рекорда объявлено', updateBest(GameState) === true &&
+  GameState.recordBeaten === true);
+GameState.score = 200;
+check('второй раз за партию вспышки нет', updateBest(GameState) === false);
+check('рекорд при этом продолжает расти', GameState.best === 200);
+restart();
+check('новая партия снимает отметку рекорда', GameState.recordBeaten === false);
+// первая партия на чистом хранилище рекордом не считается: сравнивать не с чем
+store[CONFIG.storage.bestKey] = '0';
+restart();
+GameState.score = 50;
+check('первый в жизни счёт вспышкой не объявляется', updateBest(GameState) === false);
+
+// 2. статистика: топ лучших партий и счётчики за всё время
+delete store[CONFIG.storage.statsKey];
+check('на чистом хранилище статистика пуста', (() => {
+  const stats = loadStats();
+  return stats.games === 0 && stats.best.length === 0 && stats.burns === 0;
+})());
+restart();
+GameState.score = 500;
+GameState.runStats = { burns: 12, biggestBlock: 17, longestCombo: 3, coins: 40 };
+let saved = saveRunStats(GameState);
+check('партия попала в статистику',
+  saved.games === 1 && saved.best[0].score === 500 && saved.best[0].coins === 40);
+check('счётчики за всё время накопились',
+  saved.burns === 12 && saved.biggestBlock === 17 && saved.longestCombo === 3 &&
+  saved.coins === 40);
+GameState.score = 300;
+GameState.runStats = { burns: 5, biggestBlock: 25, longestCombo: 2, coins: 10 };
+saved = saveRunStats(GameState);
+check('вторая партия добавилась, а счётчики сложились',
+  saved.games === 2 && saved.burns === 17 && saved.coins === 50);
+check('рекордный блок обновился, а цепочка нет',
+  saved.biggestBlock === 25 && saved.longestCombo === 3);
+check('лучшие партии отсортированы по счёту',
+  saved.best[0].score === 500 && saved.best[1].score === 300);
+check('список лучших режется по CONFIG', (() => {
+  for (let i = 0; i < CONFIG.ui.stats.topRuns + 5; i++) {
+    GameState.score = 1000 + i;
+    GameState.runStats = { burns: 1, biggestBlock: 1, longestCombo: 1, coins: 1 };
+    saved = saveRunStats(GameState);
+  }
+  return saved.best.length === CONFIG.ui.stats.topRuns &&
+    saved.best[0].score >= saved.best[saved.best.length - 1].score;
+})(), 'в списке ' + saved.best.length);
+check('битый JSON в хранилище не роняет статистику', (() => {
+  store[CONFIG.storage.statsKey] = 'не json';
+  const stats = loadStats();
+  return stats.games === 0 && Array.isArray(stats.best);
+})());
+
+// 3. счётчики партии копятся по ходу волны
+restart();
+delete store[CONFIG.storage.statsKey];
+setBoard({ '0,0': rep(0, 4), '1,0': rep(0, 2), '1,-1': rep(0, 2), '0,-1': rep(0, 2) });
+input.placeStack(GameState, { tiles: rep(0, 2), cell: null }, cell('-1,1'));
+check('сгорания за партию посчитаны', GameState.runStats.burns >= 1,
+  'сгораний ' + GameState.runStats.burns);
+check('самый крупный блок партии записан',
+  GameState.runStats.biggestBlock >= mergeEngine.thresholdFor(0),
+  'блок ' + GameState.runStats.biggestBlock);
+
+// 4. экран статистики открывается с оверлея конца и закрывается «Назад»
+restart();
+GameState.isGameOver = true;
+const statsBtn = render.statsButtonRect();
+fire('pointerdown', statsBtn.x + statsBtn.w / 2, statsBtn.y + statsBtn.h / 2);
+check('кнопка «Статистика» открывает экран',
+  GameState.stats !== null && GameState.stats.open === true);
+check('на экране лежат прочитанные данные, а не ссылка на хранилище',
+  GameState.stats.data && typeof GameState.stats.data.games === 'number');
+render.drawAll(GameState);                // отрисовка экрана не должна падать
+const statsBack = render.restartButtonRect();
+fire('pointerdown', statsBack.x + statsBack.w / 2, statsBack.y + statsBack.h / 2);
+check('кнопка «Назад» закрывает статистику', GameState.stats === null);
+check('партия при этом не перезапустилась', GameState.isGameOver === true);
+check('кнопки «Рейтинг» и «Статистика» не пересекаются',
+  render.leaderboardButtonRect().x + render.leaderboardButtonRect().w <=
+  render.statsButtonRect().x);
+check('обе кнопки выше кнопки «Заново»',
+  render.statsButtonRect().y + render.statsButtonRect().h <= render.restartButtonRect().y);
+openStats(GameState);
+windowHandlers.keydown({ code: 'Escape' });
+check('Esc закрывает экран статистики', GameState.stats === null);
+restart();
+
+// 5. отклик нажатия: кнопка вдавливается и отходит сама
+restart();
+check('нажатие кнопки помечает именно её',
+  input.pressButton(GameState, 'boost:' + CONFIG.boosts[0].kind) ===
+  'boost:' + CONFIG.boosts[0].kind);
+// сам эффект в тестах не поймать: часы прыгают на секунду за кадр и гасят его
+// в том же вызове, поэтому масштаб проверяем на выставленном вручную состоянии
+GameState.fx.press = { key: 'boost:' + CONFIG.boosts[0].kind, age: CONFIG.animation.pressMs / 2 };
+check('вдавливается только нажатая кнопка',
+  render.pressScaleFor(GameState, 'boost:' + CONFIG.boosts[0].kind) < 1 &&
+  render.pressScaleFor(GameState, 'boost:' + CONFIG.boosts[1].kind) === 1);
+check('к концу отклика кнопка возвращается в размер',
+  Math.abs(render.pressScaleFor(
+    Object.assign({}, GameState, { fx: { press: { key: 'restart', age: CONFIG.animation.pressMs } } }),
+    'restart') - 1) < 0.001);
+check('отклик короче предела juice в 1000 мс', CONFIG.animation.pressMs < 1000);
+GameState.fx.press = null;
+render.drawAll(GameState);        // кадр с откликом не должен падать
+restart();
 
 console.log('\n--- Phase 29: волна не роняет партию ---');
 
