@@ -58,14 +58,17 @@ const CONFIG = {
                // Радиус в соседних ступенях повторяется намеренно: и рост поля,
                // и набор цветов берут последнюю подходящую ступень, поэтому
                // промежуточные ступени — это числа, а не правка логики.
+               // Пересмотрена в Phase 25 по первому внешнему playtest: «проиграть
+               // невозможно, скучно после 40 минут». Замер подтверждал — сильная
+               // игра шла 957 ходов. Стало пять цветов на старте и вдвое более
+               // тесная лестница: партия мастера 514 ходов, счёт 5150 → 2508.
                radiusSteps: [
-                 { fromScore: 0,    radius: 2, colors: 4  },
-                 { fromScore: 1000, radius: 3, colors: 5  },   // второе кольцо
-                 { fromScore: 1600, radius: 3, colors: 6  },
-                 { fromScore: 2500, radius: 4, colors: 7  },   // третье кольцо
-                 { fromScore: 3200, radius: 4, colors: 8  },
-                 { fromScore: 4200, radius: 4, colors: 9  },
-                 { fromScore: 5500, radius: 4, colors: 10 }
+                 { fromScore: 0,    radius: 2, colors: 5  },
+                 { fromScore: 500,  radius: 3, colors: 6  },   // второе кольцо
+                 { fromScore: 900,  radius: 3, colors: 7  },
+                 { fromScore: 1400, radius: 4, colors: 8  },   // третье кольцо
+                 { fromScore: 2000, radius: 4, colors: 9  },
+                 { fromScore: 2600, radius: 4, colors: 10 }
                ] },
   hex:       { orientation: 'flat', maxSize: 55 },
   // Ступени стопок: с ростом счёта появляются двух- и трёхцветные, высота растёт.
@@ -102,10 +105,33 @@ const CONFIG = {
   // не даёт ничего, 13 даёт 3, 25 даёт 15. Раньше платили за каждую фишку, и за
   // партию набегало полторы тысячи монет при цене буста 25 — кошелёк ничего не
   // ограничивал. Теперь монета — награда за крупный блок, а не за факт игры.
+  // Phase 25: за партию набегало 937 монет при цене буста 25 — тридцать семь
+  // покупок, то есть бустами вытаскивалась любая позиция. Порог поднят, комбо
+  // платит вдвое меньше: около 180 монет за партию, шесть покупок.
   scoring:   { burnBaseTiles: 10, pointsPerTileBase: 1, pointsPerTileOver: 2,
-               coinsPerBurnedTile: 1, coinsFreeTiles: 10, comboCoinBonus: 10 },
-  // Милосердие — «мягкий старт»: работает только до disableAfterScore очков
-  mercy:     { threshold: 2, disableAfterScore: 300 },
+               coinsPerBurnedTile: 1, coinsFreeTiles: 12, comboCoinBonus: 5 },
+  // Драма-менеджер выдачи (Phase 25, ADR-0008). Пришёл на смену «милосердию»,
+  // которое подыгрывало в начале партии: замер показал, что на выживаемость оно
+  // не влияет вовсе, а ощущение «игра поддакивает новичку» давало.
+  //
+  // Теперь подыгрывание работает там, где оно драматургически уместно — когда
+  // поле почти забито, — и **ограничено**: не больше maxRescuesPerGame раз за
+  // партию, не два раза подряд и только пока счёт ниже rescueUntilScore. Без
+  // ограничений вернулась бы ровно та жалоба, с которой началась фаза:
+  // «проиграть невозможно».
+  //
+  // Обратная сторона — давление: после pressureFromScore очков первая стопка
+  // раздачи иногда нарочно не подходит ни к одной стопке поля.
+  drama:     { rescueFreeCells: 3,      // столько свободных ячеек и меньше — беда
+               maxRescuesPerGame: 3,
+               rescueUntilScore: 1500,  // дальше игрок выплывает сам
+               rescueSlots: 2,          // сколько стопок раздачи подчиняется выручке:
+                                        // одной мало — замер показал, что на исход
+                                        // партии она почти не влияет (ADR-0008)
+               pressureFromScore: 700,
+               pressureChance: 0.35,
+               pressureSlots: 1 },      // давить всей рукой нельзя: рука перестанет
+                                        // быть выбором и станет наказанием
   // Анимации. Всё, что ниже пустой строки, — juice (Phase 15): обнуление любого
   // числа гасит соответствующий эффект, логика игры от них не зависит.
   animation: { waveStepMs: 340, burnFlashMs: 280, landingMs: 150,
@@ -203,9 +229,13 @@ const CONFIG = {
                music: { gain: 0.20,        // фон заметно тише эффектов
                         volume: 1,         // регулятор игрока (Phase 19), см. volumeSfx
                         tuning: 440,       // обычный строй
-                        bpm: 96,           // бриф: 90–105, жёсткие границы 88–108
-                        stepsPerBar: 8,    // восьмые в 4/4; шаг 0.3125 с, такт 2.5 с
-                        varyBars: 8,       // рисунок партии меняется раз в 8 тактов (20 с)
+                        // Phase 26: тестировщики просят темп и динамику, и бриф
+                        // пересмотрен под них (см. music-brief.md, раздел «Правка
+                        // по playtest»). Прежний потолок 108 снят: 112 — всё ещё
+                        // спокойный темп, но пульс уже слышен.
+                        bpm: 112,
+                        stepsPerBar: 8,    // восьмые в 4/4; шаг 0.268 с, такт 2.14 с
+                        varyBars: 8,       // рисунок партии меняется раз в 8 тактов (17 с)
 
                         // Против «дёшево». Сухой одинокий осциллятор всегда звучит
                         // пищалкой; лечится тремя приёмами, и все бесплатные:
@@ -217,7 +247,8 @@ const CONFIG = {
                         filterQ: 0.9,
                         filterOpen: 4.5,    // во сколько раз выше тона открыт фильтр в атаке
                         filterClose: 1.3,   // и до чего закрывается к концу ноты
-                        filterTension: 0.3, // на тесном поле чуть ярче — и только
+                        filterTension: 0.8, // на тесном поле заметно ярче (Phase 26:
+                                            // «стало опаснее» должно быть слышно)
                         panSpread: 0.55,    // разброс по стерео
                         velocityVary: 0.35, // разброс громкости: ровные ноты звучат механически
 
@@ -251,14 +282,19 @@ const CONFIG = {
                         // Аранжировка на 104 такта ≈ 4:20 — структура из брифа.
                         // Партии включаются и выключаются сами: инструмент
                         // появляется и исчезает, и это половина «дыхания».
+                        // Phase 26: вступление вчетверо короче (12 → 4 такта) —
+                        // тестировщики слышали начало партии как пустоту, — а грув
+                        // (kick, brush, bass) вступает почти сразу и уходит только
+                        // в последней секции.
                         arrangement: [
-                          { bars: 12, parts: ['texture', 'pad', 'piano'] },
-                          { bars: 24, parts: ['texture', 'pad', 'piano', 'shaker', 'bass'] },
+                          { bars: 4,  parts: ['texture', 'pad', 'piano'] },
                           { bars: 24, parts: ['texture', 'pad', 'piano', 'shaker', 'bass',
-                                              'kalimba', 'click'] },
-                          { bars: 24, parts: ['texture', 'pad', 'marimba', 'shaker', 'bass',
-                                              'kalimba', 'click'] },
-                          { bars: 20, parts: ['texture', 'pad', 'piano', 'shaker'] }
+                                              'kick'] },
+                          { bars: 28, parts: ['texture', 'pad', 'piano', 'shaker', 'bass',
+                                              'kick', 'brush', 'kalimba', 'click'] },
+                          { bars: 28, parts: ['texture', 'pad', 'marimba', 'shaker', 'bass',
+                                              'kick', 'brush', 'kalimba', 'click'] },
+                          { bars: 16, parts: ['texture', 'pad', 'piano', 'shaker', 'bass'] }
                         ],
 
                         // Партии. tone — щипковые и пад (musicVoice), noise —
@@ -290,15 +326,29 @@ const CONFIG = {
                                      type: 'triangle', attack: 0.004, decay: 1.1, drop: 0.99,
                                      overtone: 0.2, overtoneRatio: 2.76, overtoneDecay: 0.35,
                                      motifs: [2, 3, 0] },
-                          // опора, не «жёсткий бас»: мягкая атака, корень аккорда
+                          // опора; в Phase 26 бас стал ходить по долям, а не
+                          // отмечать такт: без него пульс держать нечем
                           bass:    { kind: 'root', level: 0.34, octave: -2,
-                                     type: 'sine', attack: 0.03, decay: 1.2, drop: 0.98,
-                                     steps: [[0], [0, 4], [0, 5]] },
-                          // движение без танца: атака 0.02 — это выдох, а не щелчок
-                          shaker:  { kind: 'noise', gain: 0.10, band: 6200, q: 0.6,
+                                     type: 'sine', attack: 0.012, decay: 0.9, drop: 0.98,
+                                     steps: [[0, 4], [0, 3, 6], [0, 4, 6]] },
+                          // Ритм (Phase 26). Мягкий, но слышимый: дерево ~62 Гц
+                          // БЕЗ обертона — с обертоном 2.76 это был бы том, а не
+                          // удар. Играет фиксированную ноту, а не корень аккорда,
+                          // поэтому у него свой kind.
+                          kick:    { kind: 'drum', freq: 62, level: 0.26,
+                                     type: 'sine', attack: 0.004, decay: 0.24, drop: 0.55,
+                                     steps: [[0, 4], [0, 4, 6], [0, 3, 4]] },
+                          // «малый» из бумаги: щётка по картону на 2-й и 4-й доле,
+                          // никогда не вместе с киком на первой
+                          brush:   { kind: 'noise', gain: 0.09, band: 3200, q: 0.7,
+                                     attack: 0.006, decay: 0.16,
+                                     steps: [[2, 6], [2, 6, 7], [2, 6]],
+                                     tensionSteps: [3, 7] },
+                          // движение: атака 0.02 — это выдох, а не щелчок
+                          shaker:  { kind: 'noise', gain: 0.13, band: 6200, q: 0.6,
                                      attack: 0.02, decay: 0.12,
-                                     steps: [[1, 3, 5, 7], [1, 5], [1, 3, 5, 6, 7]],
-                                     tensionSteps: [2, 6] },
+                                     steps: [[1, 3, 5, 7], [1, 5, 7], [1, 3, 5, 6, 7]],
+                                     tensionSteps: [0, 2, 4] },
                           // «неидеальность» ручной работы
                           click:   { kind: 'noise', gain: 0.07, band: 2400, q: 0.8,
                                      attack: 0.003, decay: 0.07,
@@ -322,9 +372,9 @@ const CONFIG = {
   // label и hint — ключи в I18N, а не готовые строки (Phase 23): подписи на
   // кнопках больше не рисуются, но подсказка активного буста переводится.
   boosts:    [
-               { kind: 'move',   cost: 25, label: 'boostMove',   hint: 'hintMove' },
-               { kind: 'reroll', cost: 30, label: 'boostReroll', instant: true, hint: '' },
-               { kind: 'remove', cost: 40, label: 'boostRemove', hint: 'hintRemove' }
+               { kind: 'move',   cost: 30, label: 'boostMove',   hint: 'hintMove' },
+               { kind: 'reroll', cost: 40, label: 'boostReroll', instant: true, hint: '' },
+               { kind: 'remove', cost: 60, label: 'boostRemove', hint: 'hintRemove' }
              ],
   // Вибрация (Phase 18). Порог крупного сгорания общий с тряской экрана
   // (animation.shakeFromTiles): отдача должна совпадать с картинкой.
@@ -344,7 +394,7 @@ const CONFIG = {
                // версия 3 (Phase 23): в Phase 21 сменились и шкала прогрессии,
                // и формула монет, поэтому прежние рекорд и кошелёк несопоставимы
                // с новыми — сбрасываются один раз оба
-               economyKey: 'hexasort_economy', economyVersion: 3 },
+               economyKey: 'hexasort_economy', economyVersion: 4 },
 
   // Оформление и геометрия отрисовки
   ui: {
@@ -1298,6 +1348,12 @@ const Audio = {
         part.decay, at, out, step, part.drop);
       return true;
     }
+    if (part.kind === 'drum') {           // удар: своя частота, гармония ему не указ
+      if (part.steps[cycle % part.steps.length].indexOf(beat) === -1) return false;
+      Audio.musicVoice(part.type, part.freq, part.drop, part.level, part.attack,
+        part.decay, at, out, 0, part.filterOpen);
+      return true;
+    }
     if (part.kind === 'motif') {          // мелодия: ступени текущего аккорда
       const motif = m.motifs[part.motifs[cycle % part.motifs.length]];
       const hits = motif.filter(note => note.at === beat);
@@ -1645,24 +1701,88 @@ const generators = {
     return free;
   },
 
-  // Новая раздача из 3 стопок. Пока счёт не превысил mercy.disableAfterScore и
-  // свободных ячеек мало, первая стопка гарантированно даёт цвет, уже лежащий
-  // наверху какой-то стопки на поле. Дальше игра перестаёт подыгрывать (ADR-0004).
-  dealHand(state) {
-    const mercyAllowed = state.score < CONFIG.mercy.disableAfterScore;
-    const merciful = mercyAllowed &&
-      generators.freeCells(state).length <= CONFIG.mercy.threshold;
-    let forced;
-    if (merciful) {
-      const tops = [];
-      state.cells.forEach(cell => {
-        if (cell.stack) tops.push(cell.stack.tiles[cell.stack.tiles.length - 1]);
+  // Цвета, лежащие наверху стопок поля. По ним решается и спасение (дать такой
+  // цвет), и давление (дать какой угодно, кроме них).
+  topColorsOnBoard(state) {
+    const tops = [];
+    state.cells.forEach(cell => {
+      if (cell.stack) tops.push(cell.stack.tiles[cell.stack.tiles.length - 1]);
+    });
+    return tops;
+  },
+
+  // Цвет, которым в текущей позиции можно собрать больше всего фишек: для каждой
+  // свободной ячейки складываются верхние блоки соседей одного цвета, берётся
+  // лучшая пара «ячейка + цвет».
+  //
+  // Просто «цвет, который лежит наверху» для выручки не годится, и это показал
+  // замер: игрок проигрывает от нехватки МЕСТА, а не цвета — стопку и так можно
+  // поставить в любую свободную ячейку. Спасает только сгорание, поэтому выручка
+  // обязана давать цвет, которым сгорание реально собирается (ADR-0008).
+  bestMergeColor(state) {
+    let best = null;
+    generators.freeCells(state).forEach(cell => {
+      const sums = new Map();
+      hexMath.neighbors(cell.q, cell.r).forEach(n => {
+        const nb = state.cells.get(hexMath.key(n.q, n.r));
+        if (!nb || !nb.stack) return;
+        const run = mergeEngine.topRun(nb.stack);
+        sums.set(run.color, (sums.get(run.color) || 0) + run.length);
       });
-      if (tops.length) forced = tops[generators.randInt(0, tops.length - 1)];
+      sums.forEach((sum, color) => {
+        if (!best || sum > best.sum) best = { color, sum };
+      });
+    });
+    return best;
+  },
+
+  // Активный цвет, которого нет ни на одной вершине. undefined, если такого нет:
+  // давить нечем, и раздача идёт обычная — насильно портить игру не нужно.
+  absentTopColor(state) {
+    const busy = new Set(generators.topColorsOnBoard(state));
+    const free = [];
+    for (let color = 0; color < state.activeColors; color++) {
+      if (!busy.has(color)) free.push(color);
     }
+    if (!free.length) return undefined;
+    return free[generators.randInt(0, free.length - 1)];
+  },
+
+  // Нужна ли раздаче помощь или, наоборот, давление (ADR-0008). Решение вынесено
+  // из dealHand отдельно, потому что его же меряет tools/balance.js.
+  dramaFor(state) {
+    const drama = CONFIG.drama;
+    const free = generators.freeCells(state).length;
+    const canRescue = state.score < drama.rescueUntilScore &&
+      state.rescuesUsed < drama.maxRescuesPerGame &&
+      !state.rescuedLastDeal;               // два раза подряд — уже поддавки
+    if (canRescue && free <= drama.rescueFreeCells) {
+      const best = generators.bestMergeColor(state);
+      if (best) return { kind: 'rescue', color: best.color, slots: drama.rescueSlots };
+    }
+    if (state.score >= drama.pressureFromScore &&
+        generators.rng.next() < drama.pressureChance) {
+      const color = generators.absentTopColor(state);
+      if (color !== undefined) return { kind: 'pressure', color, slots: drama.pressureSlots };
+    }
+    return { kind: 'plain', slots: 0 };
+  },
+
+  // Новая раздача из 3 стопок. Сколько из них подчиняется драма-менеджеру, решает
+  // он сам (rescueSlots / pressureSlots): хотя бы одна стопка всегда остаётся
+  // честным случаем, иначе рука перестала бы быть выбором.
+  dealHand(state) {
+    const drama = generators.dramaFor(state);
+    if (drama.kind === 'rescue') {
+      state.rescuesUsed++;
+      state.rescuedLastDeal = true;
+    } else {
+      state.rescuedLastDeal = false;
+    }
+    const forcedSlots = Math.min(2, drama.slots || 0);
     for (let i = 0; i < 3; i++) {
       state.hand.slots[i] = generators.makeStack(
-        state.activeColors, state.score, i === 0 ? forced : undefined);
+        state.activeColors, state.score, i < forcedSlots ? drama.color : undefined);
     }
   }
 };
@@ -3452,6 +3572,10 @@ const GameState = {
   isAnimating: false,
   isGameOver: false,
   showHint: true,
+  // Драма-менеджер выдачи (Phase 25): сколько раз игра уже выручила в этой партии
+  // и не была ли выручка в прошлой раздаче — подряд подыгрывать нельзя (ADR-0008)
+  rescuesUsed: 0,
+  rescuedLastDeal: false,
   drag: null,          // текущее перетаскивание: {stack, srcSlot, pointerId, x, y}
   boost: null,         // активный буст: {kind, from}
   leaderboard: null,   // экран рейтинга: {open, loading, available, entries, playerRank}
@@ -3968,6 +4092,8 @@ function restart() {
   GameState.isAnimating = false;
   GameState.isGameOver = false;
   GameState.showHint = true;
+  GameState.rescuesUsed = 0;       // лимит выручки — на партию, а не на сессию
+  GameState.rescuedLastDeal = false;
   GameState.drag = null;
   GameState.boost = null;
   GameState.leaderboard = null;

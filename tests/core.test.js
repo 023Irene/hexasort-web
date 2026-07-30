@@ -317,8 +317,10 @@ setBoard({ '0,0': rep(0, 4), '1,0': rep(0, 3), '1,-1': rep(0, 3), '0,-1': rep(0,
 res = mergeEngine.resolveWave(GameState, cell('0,0'));
 check('блок 13 сгорел целиком (не ровно 10)', cell('0,0').stack === null, dump());
 check('очки за блок 13: 10 + 3*2 = 16', res.totalPoints === 16, 'got ' + res.totalPoints);
-check('монет за блок 13 = 3 (только сверх порога)',
-  res.totalCoins === mergeEngine.burnCoinsFor(13) && res.totalCoins === 3,
+// сколько именно — решает CONFIG (в Phase 25 порог поднят), тест сверяет формулу
+check('монеты за блок 13 идут только за фишки сверх порога',
+  res.totalCoins === mergeEngine.burnCoinsFor(13) &&
+  res.totalCoins === Math.max(0, 13 - CONFIG.scoring.coinsFreeTiles),
   'got ' + res.totalCoins);
 
 // 6. под сгоревшим блоком открывается следующий цвет
@@ -541,7 +543,8 @@ const colorsAt = (score) => { GameState.score = score; updateActiveColors(GameSt
 check('в палитре 10 цветов', CONFIG.colors.palette.length === 10,
   'got ' + CONFIG.colors.palette.length);
 check('все цвета палитры различны', new Set(CONFIG.colors.palette).size === 10);
-check('на старте 4 цвета', colorsAt(0) === 4, 'got ' + colorsAt(0));
+check('на старте столько цветов, сколько в первой ступени',
+  colorsAt(0) === ringSteps[0].colors, 'got ' + colorsAt(0));
 check('первая ступень начинается с нуля очков', ringSteps[0].fromScore === 0);
 check('пороги ступеней строго растут',
   ringSteps.every((s, i) => i === 0 || s.fromScore > ringSteps[i - 1].fromScore),
@@ -570,23 +573,29 @@ check('число цветов не превышает размер палитр
     'уникальных ' + seen.size + ', максимум ' + Math.max(...seen));
 });
 
-// 3. милосердие при 2 свободных ячейках
+// 3. выручка драма-менеджера при почти забитом поле (Phase 25, ADR-0008)
 setBoardTricolor();
 const freeKeys = ['0,0', '1,0'];
 freeKeys.forEach(k => { cell(k).stack = null; });
-check('свободных ячеек ровно 2 (порог милосердия)',
-  generators.freeCells(GameState).length === CONFIG.mercy.threshold);
-let mercyOk = true;
+GameState.rescuesUsed = 0;
+GameState.rescuedLastDeal = false;
+GameState.score = 0;
+check('на тесном поле драма-менеджер решает выручить',
+  generators.freeCells(GameState).length <= CONFIG.drama.rescueFreeCells &&
+  generators.dramaFor(GameState).kind === 'rescue');
+let rescueOk = true;
 for (let i = 0; i < 100; i++) {
   const tops = new Set();
   GameState.cells.forEach(c => { if (c.stack) tops.add(c.stack.tiles[c.stack.tiles.length - 1]); });
+  GameState.rescuesUsed = 0;              // каждый заход — как первая выручка партии
+  GameState.rescuedLastDeal = false;
   generators.dealHand(GameState);
   const first = GameState.hand.slots[0];
-  if (!tops.has(first.tiles[first.tiles.length - 1])) mercyOk = false;
+  if (!tops.has(first.tiles[first.tiles.length - 1])) rescueOk = false;
 }
-check('милосердная раздача 100 раз из 100 даёт цвет, лежащий наверху на поле', mercyOk);
+check('выручка 100 раз из 100 даёт цвет, лежащий наверху на поле', rescueOk);
 
-// 4. без милосердия (много свободных) генератор поле не разглядывает — раздача случайна
+// 4. без выручки (много свободных) генератор поле не разглядывает — раздача случайна
 restart();
 let variety = new Set();
 for (let i = 0; i < 200; i++) {
@@ -1018,7 +1027,8 @@ audioReset();
 // 8. аранжировка: бриф требует цикл 3–5 минут и структуру, а не вечную петлю
 const barSec = Audio.stepSec() * mus.stepsPerBar;
 const loopSec = Audio.loopBars() * barSec;
-check('темп внутри границ брифа 88–108', mus.bpm >= 88 && mus.bpm <= 108, 'bpm=' + mus.bpm);
+// Границы пересмотрены в Phase 26 вместе с брифом: тестировщики просили темп
+check('темп внутри границ брифа 96–120', mus.bpm >= 96 && mus.bpm <= 120, 'bpm=' + mus.bpm);
 check('цикл аранжировки длится 3–5 минут', loopSec >= 180 && loopSec <= 300,
   Math.round(loopSec) + ' с');
 check('в аранжировке несколько секций', mus.arrangement.length >= 4);
@@ -1058,31 +1068,44 @@ check('калимбы во вступлении нет', introParts.indexOf('kal
 check('фактура и пад есть с самого начала',
   introParts.indexOf('texture') !== -1 && introParts.indexOf('pad') !== -1);
 
-// 12. перкуссия мягкая и почти незаметная — прямое требование брифа
-check('ударных с киком и малым больше нет',
-  !mus.parts.kick && !mus.parts.snare);
-check('перкуссия тише мелодических партий',
-  mus.parts.shaker.gain < mus.parts.piano.level &&
-  mus.parts.click.gain < mus.parts.piano.level,
-  'шейкер ' + mus.parts.shaker.gain + ' против фортепиано ' + mus.parts.piano.level);
+// 12. ритм есть, но остаётся мягким (бриф пересмотрен в Phase 26: «нет темпа»)
+check('у музыки есть ритм-секция', !!mus.parts.kick && !!mus.parts.brush);
+check('у кика нет обертона — иначе это том, а не удар',
+  !mus.parts.kick.overtone && mus.parts.kick.freq <= 80,
+  'частота ' + mus.parts.kick.freq);
+check('кик держит свою частоту, а не идёт за аккордом', mus.parts.kick.kind === 'drum');
+check('щётка стоит на слабых долях, а не вместе с киком на первой', (() => {
+  const kickFirst = mus.parts.kick.steps.every(pattern => pattern.indexOf(0) !== -1);
+  const brushFirst = mus.parts.brush.steps.some(pattern => pattern.indexOf(0) !== -1);
+  return kickFirst && !brushFirst;
+})());
+check('ритм тише мелодии — грув, а не танцпол',
+  mus.parts.kick.level < mus.parts.piano.level &&
+  mus.parts.brush.gain < mus.parts.piano.level &&
+  mus.parts.shaker.gain < mus.parts.piano.level,
+  'кик ' + mus.parts.kick.level + ' против фортепиано ' + mus.parts.piano.level);
 check('шейкер выдыхает, а не щёлкает: атака заметно длиннее щелчка',
   mus.parts.shaker.attack >= 0.01, 'атака ' + mus.parts.shaker.attack);
 check('пад тише всех — он воздух, а не голос',
   mus.parts.pad.level < mus.parts.piano.level);
 
 // 13. натяжение влияет слабо: бриф запрещает музыке требовать внимания
+// Считаем по четырём тактам подряд, а не по одному: рисунки партий разные, и на
+// отдельно взятом такте прирост может случайно совпасть с уже занятыми долями
 const barDensity = (tension) => {
   Audio.setTension(tension);
   audioReset();
-  for (let beat = 0; beat < mus.stepsPerBar; beat++) {
-    Audio.musicStep(mus.stepsPerBar * 20 + beat, 0);
+  for (let step = mus.stepsPerBar * 20; step < mus.stepsPerBar * 24; step++) {
+    Audio.musicStep(step, 0);
   }
   return audioLog.length;
 };
 const calmBar = barDensity(0);
 const tightBar = barDensity(1);
-check('на тесном поле плотнее, но не драматично',
-  tightBar > calmBar && tightBar <= calmBar * 1.35,
+// Phase 26: динамику просили сделать слышимой, поэтому нижняя граница выросла,
+// но потолок остался — музыка по-прежнему не должна требовать внимания
+check('на тесном поле заметно плотнее, но не драматично',
+  tightBar >= calmBar * 1.1 && tightBar <= calmBar * 1.6,
   calmBar + ' → ' + tightBar);
 Audio.setTension(0);
 audioReset();
@@ -2109,31 +2132,86 @@ check('на пороге ступень вторая',
 check('далеко за последним порогом ступень последняя',
   generators.stageFor(999999) === CONFIG.stack.stages[2]);
 
-// 6. милосердие отключается после порога
-// Наверху всех стопок только цвет 0, а активных цветов 6: с милосердием первая
-// стопка обязана прийти с верхом 0, без милосердия — лишь случайно (~1/6).
-const mercyProbe = (score) => {
+// 6. границы драма-менеджера (Phase 25, ADR-0008). Подыгрывание обязано быть
+// ограниченным: без лимита вернулась бы жалоба «проиграть невозможно».
+// Тесное поле: наверху всех стопок только цвет 0, активных цветов 6.
+const tightBoard = (score) => {
   restart();
   GameState.activeColors = 6;
   GameState.cells.forEach(c => { c.stack = { tiles: [0, 0], cell: { q: c.q, r: c.r } }; });
   ['0,0', '1,0'].forEach(k => { cell(k).stack = null; });
   GameState.score = score;
-  const tops = new Set();
-  GameState.cells.forEach(c => { if (c.stack) tops.add(c.stack.tiles[c.stack.tiles.length - 1]); });
-  let matched = 0;
-  for (let i = 0; i < 60; i++) {
-    generators.dealHand(GameState);
-    const first = GameState.hand.slots[0];
-    if (tops.has(first.tiles[first.tiles.length - 1])) matched++;
-  }
-  return matched;
+  GameState.rescuesUsed = 0;
+  GameState.rescuedLastDeal = false;
 };
-const off = CONFIG.mercy.disableAfterScore;
-check('милосердие работает за очко до порога', mercyProbe(off - 1) === 60,
-  'совпало ' + mercyProbe(off - 1) + '/60');
-const afterOff = mercyProbe(off);
-check('на пороге милосердие отключено (совпадения только случайные)', afterOff < 60,
-  'совпало ' + afterOff + '/60');
+const drama = CONFIG.drama;
+tightBoard(0);
+check('первая выручка в партии срабатывает',
+  generators.dramaFor(GameState).kind === 'rescue');
+generators.dealHand(GameState);
+check('счётчик выручек вырос', GameState.rescuesUsed === 1);
+check('подряд второй раз игра не выручает',
+  generators.dramaFor(GameState).kind !== 'rescue');
+generators.dealHand(GameState);          // раздача без выручки снимает флаг
+check('через раздачу выручка снова доступна',
+  generators.dramaFor(GameState).kind === 'rescue');
+
+tightBoard(0);
+let rescueGuard = 0;
+while (GameState.rescuesUsed < drama.maxRescuesPerGame && rescueGuard++ < 50) {
+  generators.dealHand(GameState);
+}
+check('за партию выручек не больше лимита', (() => {
+  for (let i = 0; i < 20; i++) generators.dealHand(GameState);
+  return GameState.rescuesUsed === drama.maxRescuesPerGame;
+})(), 'выручек ' + GameState.rescuesUsed);
+
+tightBoard(drama.rescueUntilScore);
+check('после порога очков игра не выручает вовсе',
+  generators.dramaFor(GameState).kind !== 'rescue');
+tightBoard(drama.rescueUntilScore - 1);
+check('за очко до порога выручка ещё работает',
+  generators.dramaFor(GameState).kind === 'rescue');
+
+// давление: цвет, которого нет ни на одной вершине
+tightBoard(drama.pressureFromScore);
+GameState.cells.forEach(c => { if (c.stack) c.stack.tiles = [0, 0]; });
+GameState.rescuesUsed = drama.maxRescuesPerGame;      // выручка исчерпана
+const absent = generators.absentTopColor(GameState);
+check('давление берёт цвет, которого нет на вершинах',
+  absent !== undefined && absent !== 0);
+check('под давлением первая стопка не подходит к полю', (() => {
+  let pressured = 0;
+  for (let i = 0; i < 200; i++) {
+    if (generators.dramaFor(GameState).kind === 'pressure') pressured++;
+  }
+  // доля близка к pressureChance; точное значение зависит от rng, поэтому коридор
+  return pressured > 200 * drama.pressureChance * 0.5 &&
+    pressured < 200 * drama.pressureChance * 1.5;
+})());
+tightBoard(drama.pressureFromScore - 1);
+GameState.rescuesUsed = drama.maxRescuesPerGame;
+check('до порога давления раздача обычная', (() => {
+  for (let i = 0; i < 100; i++) {
+    if (generators.dramaFor(GameState).kind === 'pressure') return false;
+  }
+  return true;
+})());
+check('когда все цвета лежат на вершинах, давить нечем', (() => {
+  restart();
+  GameState.activeColors = 3;
+  let index = 0;
+  GameState.cells.forEach(c => {
+    c.stack = { tiles: [index % 3, index % 3], cell: { q: c.q, r: c.r } };
+    index++;
+  });
+  return generators.absentTopColor(GameState) === undefined;
+})());
+check('новая партия обнуляет счётчик выручек', (() => {
+  GameState.rescuesUsed = 2;
+  restart();
+  return GameState.rescuesUsed === 0 && GameState.rescuedLastDeal === false;
+})());
 
 console.log('\n--- Phase 6: экономика (очки и монеты) ---');
 
@@ -2150,12 +2228,15 @@ check('старых ключей burnBasePoints/pointsPerFlowedTile в CONFIG н
 // 2. очки по формуле, монеты — только за фишки сверх порога (ADR-0007)
 setBoard({ '0,0': rep(0, 4), '1,0': rep(0, 3), '1,-1': rep(0, 3), '0,-1': rep(0, 3) });
 res = mergeEngine.resolveWave(GameState, cell('0,0'));
-check('13 фишек → 16 очков и 3 монеты',
-  res.totalPoints === 16 && res.totalCoins === 3,
+check('13 фишек → 16 очков и монеты по формуле',
+  res.totalPoints === 16 && res.totalCoins === mergeEngine.burnCoinsFor(13),
   'points=' + res.totalPoints + ' coins=' + res.totalCoins);
-check('формула монет: платят только фишки сверх порога',
-  mergeEngine.burnCoinsFor(10) === 0 && mergeEngine.burnCoinsFor(13) === 3 &&
-  mergeEngine.burnCoinsFor(25) === 15);
+check('формула монет: платят только фишки сверх порога', (() => {
+  const free = CONFIG.scoring.coinsFreeTiles;
+  return mergeEngine.burnCoinsFor(free) === 0 &&
+    mergeEngine.burnCoinsFor(free + 3) === 3 &&
+    mergeEngine.burnCoinsFor(free + 15) === 15;
+})());
 
 // 2б. очки идут только за исчезновение: перелив 9 фишек без сгорания = 0 очков
 setBoard({ '0,0': rep(0, 2), '1,0': rep(0, 3), '1,-1': rep(0, 3) });
@@ -2192,8 +2273,10 @@ setBoard({ '0,0': rep(0, 4), '1,0': rep(0, 3), '0,-1': rep(0, 3) });
 GameState.coins = 0;
 input.placeStack(GameState, { tiles: rep(0, 3), cell: null }, cell('1,-1'));
 const bigBurnCoins = mergeEngine.burnCoinsFor(13);
-check('за блок из 13 фишек начислено 3 монеты',
-  GameState.coins === bigBurnCoins && bigBurnCoins === 3, 'coins=' + GameState.coins);
+check('за блок из 13 фишек начислено столько монет, сколько даёт формула',
+  GameState.coins === bigBurnCoins &&
+  bigBurnCoins === Math.max(0, 13 - CONFIG.scoring.coinsFreeTiles),
+  'coins=' + GameState.coins);
 check('кошелёк записан в хранилище через Platform',
   store[CONFIG.storage.coinsKey] === String(bigBurnCoins),
   'stored=' + store[CONFIG.storage.coinsKey]);
@@ -2482,12 +2565,15 @@ check('замер кадра по умолчанию выключен', render.f
   Platform.leaderboards = { setLeaderboardScore: (name, score) => submitted.push({ name, score }) };
   const submittedBefore = submitted.length;
   setBoardTricolor();
-  GameState.score = 777;
+  // счёт берём на очко ниже порога второго кольца: иначе поле вырастет прямо
+  // перед проверкой конца партии и проигрыша не будет (числа баланса меняются)
+  const loseScore = CONFIG.board.radiusSteps[1].fromScore - 1;
+  GameState.score = loseScore;
   cell('0,0').stack = null;
   input.placeStack(GameState, { tiles: [0], cell: null }, cell('0,0'));
   check('при проигрыше счёт отправлен в рейтинг',
     GameState.isGameOver === true && submitted.length === submittedBefore + 1 &&
-    submitted[submitted.length - 1].score === 777);
+    submitted[submitted.length - 1].score === loseScore);
   Platform.leaderboards = null;
 
   // 6a. обязательная разметка платформы (Phase 20): без LoadingAPI.ready()
