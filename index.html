@@ -71,16 +71,37 @@ const CONFIG = {
                  { fromScore: 2600, radius: 4, colors: 10 }
                ] },
   hex:       { orientation: 'flat', maxSize: 55 },
-  // Ступени стопок: с ростом счёта появляются двух- и трёхцветные, высота растёт.
-  // Высота подбирается под выпавший тип (duo нужно >= 4 фишки, tri >= 6 при
-  // minBlockSize 2), поэтому веса соблюдаются точно и тип не «проседает» (ADR-0004).
+  // Ступени стопок. Состав руки за партию **переворачивается**: начинается с
+  // простых одноцветных, заканчивается четырёхцветными (схема пользователя,
+  // Phase 28). Раньше лестница замирала на 500 очках навсегда, и вторая половина
+  // партии не усложнялась вообще — отсюда «дохожу до 3000 без напряжения».
+  //
+  // Сколько блоков у типа — в blocksByType: добавить пятиблочные стопки станет
+  // строчкой в конфиге, а не правкой логики. Высота подбирается под выпавший тип
+  // (quad нужно >= 8 фишек при minBlockSize 2), поэтому веса соблюдаются точно
+  // и тип не «проседает» (ADR-0004).
   stack:     { minBlockSize: 2,
+               blocksByType: { mono: 1, duo: 2, tri: 3, quad: 4 },
                stages: [
-                 { fromScore: 0,   weights: { mono: 100, duo: 0,  tri: 0  }, minHeight: 2, maxHeight: 4 },
-                 { fromScore: 100, weights: { mono: 30,  duo: 70, tri: 0  }, minHeight: 3, maxHeight: 5 },
-                 { fromScore: 500, weights: { mono: 20,  duo: 50, tri: 30 }, minHeight: 4, maxHeight: 6 }
-               ] },
-  merge:     { burnThreshold: 10, maxWaveIterations: 100 },
+                 { fromScore: 0,    weights: { mono: 50, duo: 30, tri: 15, quad: 5  }, minHeight: 2, maxHeight: 5 },
+                 { fromScore: 800,  weights: { mono: 35, duo: 30, tri: 25, quad: 10 }, minHeight: 3, maxHeight: 6 },
+                 { fromScore: 2500, weights: { mono: 20, duo: 25, tri: 30, quad: 25 }, minHeight: 4, maxHeight: 7 },
+                 { fromScore: 7500, weights: { mono: 5,  duo: 15, tri: 30, quad: 50 }, minHeight: 5, maxHeight: 9 }
+               ],
+               // Стартовое поле раскладывается отдельно и всегда простыми стопками.
+               // Ступени выше — про руку: если раздать ими ещё и доску, партия
+               // иногда обрывается в первые полминуты (замер: 3 % партий до 250
+               // очков), а первые секунды решают, останется ли новичок.
+               startBoard: { weights: { mono: 100 }, minHeight: 2, maxHeight: 4 } },
+  // Порог сгорания тоже растёт (Phase 28): к концу партии собрать блок труднее.
+  // Очки при этом по-прежнему считаются от scoring.burnBaseTiles, поэтому
+  // сгорание при поднятом пороге сразу даёт больше базовой ставки.
+  merge:     { thresholdSteps: [
+                 { fromScore: 0,    threshold: 10 },
+                 { fromScore: 1500, threshold: 11 },
+                 { fromScore: 3000, threshold: 12 }
+               ],
+               maxWaveIterations: 100 },
   // Набор цветов расширяется вместе с полем (см. board.radiusSteps): 4 -> 7 -> 10.
   // Порядок важен: первые четыре — самые контрастные.
   colors:    { palette: [
@@ -394,7 +415,7 @@ const CONFIG = {
                // версия 3 (Phase 23): в Phase 21 сменились и шкала прогрессии,
                // и формула монет, поэтому прежние рекорд и кошелёк несопоставимы
                // с новыми — сбрасываются один раз оба
-               economyKey: 'hexasort_economy', economyVersion: 4 },
+               economyKey: 'hexasort_economy', economyVersion: 5 },
 
   // Оформление и геометрия отрисовки
   ui: {
@@ -514,7 +535,9 @@ const I18N = {
     boostReroll: 'Пересдача',
     boostRemove: 'Убрать',
     hintMove: 'Выбери стопку, потом свободную ячейку',
-    hintRemove: 'Выбери стопку, которую убрать'
+    hintRemove: 'Выбери стопку, которую убрать',
+    combo: 'Комбо ×',
+    newThreshold: 'Теперь нужно '
   },
   en: {
     hint: 'Place a stack next to the same colour',
@@ -543,7 +566,9 @@ const I18N = {
     boostReroll: 'Reshuffle',
     boostRemove: 'Remove',
     hintMove: 'Pick a stack, then an empty cell',
-    hintRemove: 'Pick a stack to remove'
+    hintRemove: 'Pick a stack to remove',
+    combo: 'Combo ×',
+    newThreshold: 'Now you need '
   }
 };
 
@@ -1141,7 +1166,10 @@ const Audio = {
   burn(tiles) {
     if (!Audio.ready('burn')) return false;
     const v = Audio.voice('burn');
-    const size = Math.min(tiles || CONFIG.merge.burnThreshold, 30) / CONFIG.merge.burnThreshold;
+    // мерка размера — базовый порог, а не текущий: тембр сгорания не должен
+    // ползти вместе с прогрессией (Phase 28)
+    const base = CONFIG.merge.thresholdSteps[0].threshold;
+    const size = Math.min(tiles || base, 30) / base;
     const freq = v.freq / Math.pow(size, v.sizeCurve);
     Audio.tone('burn', freq, Object.assign({}, v, { decay: v.decay + size * v.decayPerSize }));
     // призвук октавой выше — всегда синус, иначе он спорит с основным тоном
@@ -1626,22 +1654,26 @@ const generators = {
     return current;
   },
 
-  // Тип стопки по весам ступени
-  pickStackType(w) {
-    const total = w.mono + w.duo + w.tri;
+  // Тип стопки по весам ступени. Перебор идёт по blocksByType, а не по трём
+  // именам вручную: новый тип — это строчка в CONFIG, а не правка логики.
+  pickStackType(weights) {
+    const types = Object.keys(CONFIG.stack.blocksByType);
+    const total = types.reduce((sum, type) => sum + (weights[type] || 0), 0);
     let roll = generators.rng.next() * total;
-    if ((roll -= w.mono) < 0) return 'mono';
-    if ((roll -= w.duo) < 0) return 'duo';
-    return 'tri';
+    for (let i = 0; i < types.length; i++) {
+      roll -= weights[types[i]] || 0;
+      if (roll < 0) return types[i];
+    }
+    return types[0];
   },
 
   // Стопка = массив цветов снизу вверх. Многоблочные типы собираются
   // из блоков не меньше minBlockSize, соседние блоки разного цвета.
   // Веса типов и диапазон высоты берутся из ступени по текущему счёту.
-  makeStack(activeColors, score, forcedTopColor) {
-    const stage = generators.stageFor(score || 0);
+  makeStack(activeColors, score, forcedTopColor, stageOverride) {
+    const stage = stageOverride || generators.stageFor(score || 0);
     const type = generators.pickStackType(stage.weights);
-    const blocks = type === 'mono' ? 1 : (type === 'duo' ? 2 : 3);
+    const blocks = CONFIG.stack.blocksByType[type];
     const minBlock = CONFIG.stack.minBlockSize;
     // Высота подбирается под тип: на N блоков нужно минимум N * minBlockSize фишек,
     // иначе выпавший duo/tri молча превращался бы в стопку попроще
@@ -1650,13 +1682,19 @@ const generators = {
     const maxH = Math.max(stage.maxHeight, needed);
     const height = generators.randInt(minH, maxH);
 
+    // Размеры блоков: каждому по минимуму, остаток раздаётся случайным блокам.
+    // Раньше весь остаток доставался верхнему блоку — и многоблочная стопка
+    // приходила с крупной «шапкой» одного цвета, то есть почти не усложняла игру
+    // (Phase 28: верхний блок держался на 2.9 фишки при любом составе).
+    const sizes = new Array(blocks).fill(minBlock);
+    for (let extra = height - blocks * minBlock; extra > 0; extra--) {
+      sizes[generators.randInt(0, blocks - 1)]++;
+    }
+
     const tiles = [];
     const usedColors = new Set();       // цвет не повторяется во всей стопке, а не
-    let left = height;                  // только в соседних блоках (правило пользователя)
-    for (let b = 0; b < blocks; b++) {
-      const isLast = b === blocks - 1;
-      const reserved = (blocks - 1 - b) * minBlock;   // хватит ли оставшимся блокам
-      const size = isLast ? left : generators.randInt(minBlock, left - reserved);
+    for (let b = 0; b < blocks; b++) {  // только в соседних блоках (правило пользователя)
+      const size = sizes[b];
       let color = generators.randomColor(activeColors);
       let guard = 0;
       while (usedColors.has(color) && usedColors.size < activeColors && guard++ < 50) {
@@ -1664,7 +1702,6 @@ const generators = {
       }
       usedColors.add(color);
       for (let i = 0; i < size; i++) tiles.push(color);
-      left -= size;
     }
     // Милосердный генератор навязывает цвет верхнего блока
     if (forcedTopColor !== undefined && forcedTopColor !== null) {
@@ -1687,8 +1724,9 @@ const generators = {
     }
     for (let i = 0; i < count; i++) {
       const cell = state.cells.get(keys[i]);
-      // стартовое поле всегда простое: первая ступень, одноцветные стопки
-      const stack = generators.makeStack(state.activeColors, 0);
+      // стартовое поле всегда простое — своя ступень, только одноцветные стопки
+      const stack = generators.makeStack(state.activeColors, 0, undefined,
+        CONFIG.stack.startBoard);
       stack.cell = { q: cell.q, r: cell.r };
       cell.stack = stack;
     }
@@ -1871,11 +1909,20 @@ const mergeEngine = {
     return Math.max(0, tiles - s.coinsFreeTiles) * s.coinsPerBurnedTile;
   },
 
+  // Порог сгорания растёт со счётом (Phase 28): последняя подходящая ступень —
+  // тот же приём, что у radiusForScore и generators.stageFor.
+  thresholdFor(score) {
+    const steps = CONFIG.merge.thresholdSteps;
+    let threshold = steps[0].threshold;
+    steps.forEach(step => { if ((score || 0) >= step.fromScore) threshold = step.threshold; });
+    return threshold;
+  },
+
   // Сгорание: верхний блок дорос до порога — горит целиком (13 → горят 13)
   burnIfReady(state, cell, waveNumber) {
     if (!cell.stack) return { burned: false };
     const run = mergeEngine.topRun(cell.stack);
-    if (run.length < CONFIG.merge.burnThreshold) return { burned: false };
+    if (run.length < mergeEngine.thresholdFor(state.score)) return { burned: false };
     cell.stack.tiles.length -= run.length;
     if (!cell.stack.tiles.length) cell.stack = null;
     return {
@@ -3576,6 +3623,8 @@ const GameState = {
   // и не была ли выручка в прошлой раздаче — подряд подыгрывать нельзя (ADR-0008)
   rescuesUsed: 0,
   rescuedLastDeal: false,
+  // текущий порог сгорания: растёт со счётом, о повышении игрока предупреждают
+  burnThreshold: CONFIG.merge.thresholdSteps[0].threshold,
   drag: null,          // текущее перетаскивание: {stack, srcSlot, pointerId, x, y}
   boost: null,         // активный буст: {kind, from}
   leaderboard: null,   // экран рейтинга: {open, loading, available, entries, playerRank}
@@ -3749,7 +3798,7 @@ function waveCommit(state, plan, ctx) {
       Platform.vibrate(CONFIG.haptics.combo);
       state.fx.floats.push({
         cell: res.burns[0].cell, age: 0, accent: true,
-        text: 'Комбо ×' + res.combo + (res.comboCoins ? '  +' + res.comboCoins : '')
+        text: t('combo') + res.combo + (res.comboCoins ? '  +' + res.comboCoins : '')
       });
     }
     startFx(state);
@@ -3813,6 +3862,7 @@ function finishWave(state) {
     Audio.deal();
   }
   updateBest(state);
+  announceThreshold(state);    // порог сгорания мог вырасти — об этом надо сказать
   checkGameOver(state);
   updateMusicTension(state);   // после checkGameOver: на проигрыше фон успокаивается
 
@@ -3826,6 +3876,27 @@ function finishWave(state) {
     state.isAnimating = false;
     requestRender();
   }
+}
+
+// Порог сгорания растёт со счётом (Phase 28), и об этом обязательно надо сказать:
+// молча изменившееся правило читается как поломка — блок из десяти вдруг не горит,
+// и непонятно почему. Сообщение идёт тем же путём, что «+N очков» и «Комбо».
+// Возвращает показанный текст (или null): в тестах эффект не поймать — часы там
+// прыгают на секунду за кадр, и всплывающая надпись умирает в том же вызове.
+function announceThreshold(state) {
+  const threshold = mergeEngine.thresholdFor(state.score);
+  if (threshold === state.burnThreshold) return null;
+  const grew = threshold > state.burnThreshold;
+  state.burnThreshold = threshold;
+  if (!grew) return null;                     // вниз порог не ходит, но на всякий случай
+  const text = t('newThreshold') + threshold;
+  const center = state.cells.get(hexMath.key(0, 0));
+  if (center) {
+    state.fx.floats.push({ cell: center, age: 0, accent: true, text });
+    startFx(state);
+  }
+  Audio.ring();                               // тот же голос, что у нового кольца
+  return text;
 }
 
 // --- Камера ----------------------------------------------------------------
@@ -4094,6 +4165,7 @@ function restart() {
   GameState.showHint = true;
   GameState.rescuesUsed = 0;       // лимит выручки — на партию, а не на сессию
   GameState.rescuedLastDeal = false;
+  GameState.burnThreshold = mergeEngine.thresholdFor(0);
   GameState.drag = null;
   GameState.boost = null;
   GameState.leaderboard = null;
