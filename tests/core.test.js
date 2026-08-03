@@ -1,4 +1,4 @@
-// Тесты ядра HexaSort Web — чистый Node, без npm и зависимостей (ADR-0002).
+﻿// Тесты ядра HexaSort Web — чистый Node, без npm и зависимостей (ADR-0002).
 // Запуск:  node tests/core.test.js     (код выхода 0 = всё зелёное)
 //
 // Как это работает: вырезаем <script> из index.html и выполняем его в Node,
@@ -116,8 +116,9 @@ js += '\nmodule.exports = { CONFIG, Platform, Audio, hexMath, generators, mergeE
   ' resetCamera, nearestSnapAngle, snapRotation, THEMES, applyTheme, updateMusicTension,' +
   ' openSettings, closeSettings, applySettings, persistSettings,' +
   ' I18N, t, setLang, detectLang, layoutUi, canvasHeightFor, captureUiBase,' +
-  ' announceThreshold, openStats, closeStats, loadStats, saveRunStats, emptyStats,' +
-  ' updateBest };';
+  ' announceThreshold, loadStats, saveRunStats, emptyStats,' +
+  ' updateBest, flowDuration, spawnBurnFx, revive, canRevive, reviveCost,' +
+  ' leagueTier, leagueLabel };';
 const mod = { exports: {} };
 new Function('module', 'localStorage', 'requestAnimationFrame', 'document', 'performance',
   'setTimeout', 'window', 'location', 'AudioContext', 'setInterval', 'clearInterval',
@@ -130,7 +131,9 @@ const { CONFIG, Platform, Audio, hexMath, generators, mergeEngine, GameState, re
   updateMusicTension, openSettings, closeSettings, applySettings,
   persistSettings, I18N, t, setLang, detectLang,
   layoutUi, canvasHeightFor, captureUiBase, announceThreshold,
-  openStats, closeStats, loadStats, saveRunStats, emptyStats, updateBest } = mod.exports;
+  loadStats, saveRunStats, emptyStats, updateBest,
+  flowDuration, spawnBurnFx, revive, canRevive, reviveCost,
+  leagueTier, leagueLabel } = mod.exports;
 
 // Звук между проверками надо гасить: журнал общий, а троттлинг помнит прошлый вызов
 const audioReset = () => { audioLog.length = 0; Audio.lastAt = {}; };
@@ -172,13 +175,19 @@ const dump = () => Array.from(GameState.cells.keys()).sort().map(k => {
 const cell = (k) => GameState.cells.get(k);
 const rep = (color, n) => new Array(n).fill(color);
 
-// Готовая расстановка «ход даёт ровно блок из 10»: в центре 4 фишки, у двух его
-// соседей по 2, игрок ставит 2 в третьего соседа центра. Точкой сбора становится
-// центр (самый длинный верхний блок), в него стекается всё: 4 + 2 + 2 + 2 = 10.
+// Готовая расстановка «ход даёт ровно блок в порог»: у двух соседей центра по 2
+// фишки, игрок ставит 2 в третьего соседа. Точкой сбора становится центр (самый
+// длинный верхний блок), в него стекается всё: центр + 2 + 2 + 2 = порог.
+//
+// Высота центра считается от текущего порога, а не задана числом: порог — число
+// баланса (Phase 36 подняла его с 10 до 11), и тесты не должны от него зависеть.
+const BURN_THRESHOLD = mergeEngine.thresholdFor(0);
 const setBoardForBurn = () => {
-  setBoard({ '0,0': rep(0, 4), '1,0': rep(0, 2), '0,-1': rep(0, 2) });
+  setBoard({ '0,0': rep(0, BURN_THRESHOLD - 6), '1,0': rep(0, 2), '0,-1': rep(0, 2) });
 };
 const playBurnMove = () => input.placeStack(GameState, { tiles: rep(0, 2), cell: null }, cell('1,-1'));
+// очки и монеты за блок ровно в порог — тоже из формул движка, а не литералами
+const BURN_POINTS = mergeEngine.burnPointsFor(BURN_THRESHOLD);
 
 console.log('--- Phase 1: поле и математика ---');
 check('ячеек на поле = 19', GameState.cells.size === 19, 'got ' + GameState.cells.size);
@@ -307,11 +316,14 @@ mergeEngine.resolveWave(GameState, cell('0,0'));
 check('сосед другого цвета не переливается',
   cell('0,0').stack.tiles.join('') === '00' && cell('1,0').stack.tiles.join('') === '11');
 
-// 4. сгорание при 10: только за сгоревшие фишки, ячейка освобождается
-setBoard({ '0,0': rep(0, 4), '1,0': rep(0, 2), '1,-1': rep(0, 2), '0,-1': rep(0, 2) });
+// 4. сгорание ровно в порог: только за сгоревшие фишки, ячейка освобождается.
+// Высота центра считается от порога — он число баланса и меняется между фазами.
+setBoard({ '0,0': rep(0, BURN_THRESHOLD - 6), '1,0': rep(0, 2),
+           '1,-1': rep(0, 2), '0,-1': rep(0, 2) });
 res = mergeEngine.resolveWave(GameState, cell('0,0'));
-check('блок из 10 сгорел, ячейка освободилась', cell('0,0').stack === null, dump());
-check('очки за блок 10 = 10 (переливы не считаются)', res.totalPoints === 10, 'got ' + res.totalPoints);
+check('блок ровно в порог сгорел, ячейка освободилась', cell('0,0').stack === null, dump());
+check('очки за блок в порог (переливы не считаются)',
+  res.totalPoints === BURN_POINTS, 'got ' + res.totalPoints + ' ждали ' + BURN_POINTS);
 // монеты платят только за фишки сверх порога (ADR-0007): ровно порог — ноль
 check('блок ровно в порог монет не даёт', res.totalCoins === 0, 'got ' + res.totalCoins);
 
@@ -327,22 +339,26 @@ check('монеты за блок 13 идут только за фишки св�
   'got ' + res.totalCoins);
 
 // 6. под сгоревшим блоком открывается следующий цвет
-setBoard({ '0,0': [1, 1, 0], '1,0': rep(0, 3), '1,-1': rep(0, 3), '0,-1': rep(0, 3) });
+setBoard({ '0,0': [1, 1].concat(rep(0, BURN_THRESHOLD - 9)),
+           '1,0': rep(0, 3), '1,-1': rep(0, 3), '0,-1': rep(0, 3) });
 res = mergeEngine.resolveWave(GameState, cell('0,0'));
 check('после сгорания открылся нижний цвет', cell('0,0').stack.tiles.join('') === '11', dump());
 
-// 7. цепочка: сгорание волны 1 открывает цвет, волна 2 добирает и горит с множителем 2
+// 7. цепочка: сгорание волны 1 открывает цвет, волна 2 добирает и тоже горит.
+// Обе стопки собраны от порога: под верхним блоком лежит ровно порог минус то,
+// что притечёт от соседей.
 setBoard({
-  '0,0': rep(1, 9).concat([0]),
+  '0,0': rep(1, BURN_THRESHOLD - 1).concat(rep(0, BURN_THRESHOLD - 9)),
   '1,0': rep(0, 3), '1,-1': rep(0, 3), '0,-1': rep(0, 3),
   '-1,0': [1]
 });
 res = mergeEngine.resolveWave(GameState, cell('0,0'));
 check('цепочка прошла две волны', res.waves === 2, 'waves=' + res.waves);
 check('оба сгорания случились, поле пусто', dump().split('|').every(s => s.endsWith(':-')), dump());
-check('очки цепочки: два блока по 10 = 20', res.totalPoints === 20, 'got ' + res.totalPoints);
-check('множителя очков нет: вторая волна даёт те же 10',
-  res.steps[1].points === 10, JSON.stringify(res.steps));
+check('очки цепочки: два блока в порог',
+  res.totalPoints === BURN_POINTS * 2, 'got ' + res.totalPoints);
+check('множителя очков нет: вторая волна даёт столько же',
+  res.steps[1].points === BURN_POINTS, JSON.stringify(res.steps));
 // Комбо (Phase 16) платит монетами, а не очками: первое звено без бонуса,
 // второе даёт comboCoinBonus. Сами блоки здесь ровно в порог, поэтому своих
 // монет не приносят вовсе — весь доход цепочки это и есть бонус за комбо.
@@ -480,8 +496,9 @@ check('на оверлее стопку взять нельзя', GameState.drag
 fire('pointerdown', 30, 30);
 check('клик мимо кнопки «Заново» игру не сбрасывает', GameState.isGameOver === true);
 
-// 4. кнопка «Заново» — свежая партия
-const btn = render.restartButtonRect();
+// 4. кнопка «Заново» — свежая партия. Нижний ряд оверлея делят «Возрождение»
+// и «Заново» (Phase 37), поэтому кнопка теперь половинной ширины.
+const btn = render.restartHalfRect();
 fire('pointerdown', btn.x + btn.w / 2, btn.y + btn.h / 2);
 check('кнопка «Заново» даёт свежее поле и счёт 0',
   GameState.isGameOver === false && GameState.score === 0 &&
@@ -494,7 +511,7 @@ setBoardForBurn();
 GameState.best = 0;
 GameState.score = 0;
 playBurnMove();
-check('сгорание блока 10 дало ровно 10 очков', GameState.score === 10,
+check('сгорание блока в порог дало ровно свои очки', GameState.score === BURN_POINTS,
   'score=' + GameState.score);
 check('рекорд подтянулся во время партии, до её конца',
   GameState.best === GameState.score && store[CONFIG.storage.bestKey] === String(GameState.score),
@@ -630,7 +647,8 @@ check('после хода landing сброшен', GameState.landing === null);
 check('после хода burnAnim сброшен', GameState.burnAnim === null);
 check('после хода anim сброшен', GameState.anim === null);
 check('ввод разблокирован', GameState.isAnimating === false);
-check('сгорание случилось (счёт 10)', GameState.score === 10, 'score=' + GameState.score);
+check('сгорание случилось (счёт = очки за блок в порог)',
+  GameState.score === BURN_POINTS, 'score=' + GameState.score);
 
 // 6. длинная партия ботом: цвета растут вместе со счётом, состояние чистое
 restart();
@@ -730,8 +748,8 @@ check('applySettings поднимает язык из хранилища',
 const lastLangRect = render.langButtonRect(langs.length - 1);
 check('кнопки языка внутри канваса',
   lastLangRect.x + lastLangRect.w <= CONFIG.canvas.width);
-check('ряд языка выше кнопки «Назад»',
-  lastLangRect.y + lastLangRect.h < render.restartButtonRect().y);
+check('ряд языка выше нижнего ряда кнопок',
+  lastLangRect.y + lastLangRect.h < render.settingsBackRect().y);
 
 // 6. в коде отрисовки не осталось зашитых русских строк — иначе перевод дырявый
 const i18nSection = js.slice(js.indexOf('const I18N = {'), js.indexOf('function t(key)'));
@@ -760,6 +778,10 @@ check('у каждого буста есть значок',
   Object.keys(render.iconPaths).join(', '));
 check('значки монеты и кубка тоже заданы путями',
   !!render.iconPaths.coin && !!render.iconPaths.trophy);
+// Phase 31: счёт и настройки въехали в тот же набор — раньше у счёта значка не
+// было вовсе, а шестерёнка рисовалась мимо системы значков
+check('у счёта и настроек тоже есть значки',
+  !!render.iconPaths.score && !!render.iconPaths.gear);
 check('пути записаны в системе SVG — начинаются с команды M',
   Object.keys(render.iconPaths).every(name => {
     const icon = render.iconPaths[name];
@@ -771,11 +793,16 @@ let iconsOk = true;
 try {
   render.coinIcon(50, 50, 9);
   render.trophyIcon(400, 40, CONFIG.ui.trophySize);
+  render.drawIcon('score', 360, 62, CONFIG.ui.scoreIconSize, '#000');
+  render.drawSettingsButton(GameState);
   CONFIG.boosts.forEach(b => render.boostIcon(b.kind, 100, 100, 18));
   render.boostIcon('неизвестный', 100, 100, 18);   // чужой вид не должен ронять кадр
 } catch (e) {
   iconsOk = false;
 }
+check('шестерёнка рисуется значком, а не своим гексом мимо набора',
+  /drawIcon/.test(render.drawSettingsButton.toString()) &&
+  !/hexPath/.test(render.drawSettingsButton.toString()));
 check('значки монеты, кубка и бустов рисуются', iconsOk);
 check('неизвестный значок рисоваться не берётся',
   render.drawIcon('такого нет', 0, 0, 10, '#000') === false);
@@ -794,15 +821,27 @@ check('в кэше лежат Path2D по строке пути',
 check('textWidth работает без measureText',
   render.textWidth('Рекорд: 1234', 10) === 120,
   'got ' + render.textWidth('Рекорд: 1234', 10));
-check('кубок помещается левее строки рекорда и правее счёта',
-  CONFIG.ui.bestX - render.textWidth('Рекорд: 88888', 10) - CONFIG.ui.trophyGap >
-  CONFIG.canvas.width / 2 + 60);
+// Верх экрана переразмечен (Phase 37): рекорд с кубком слева, счёт по центру,
+// лига справа. Проверяем, что левый блок не доезжает до группы счёта.
+const scoreGroupLeft = CONFIG.canvas.width / 2 -
+  (CONFIG.ui.scoreIconSize + CONFIG.ui.scoreIconGap +
+   render.textWidth('88888', CONFIG.ui.scoreCharWidth)) / 2;
+check('строка рекорда с кубком не доезжает до счёта',
+  CONFIG.ui.bestX + CONFIG.ui.trophySize + CONFIG.ui.trophyGap +
+  render.textWidth('Рекорд: 88888', 10) < scoreGroupLeft,
+  'левый край счёта ' + scoreGroupLeft);
 
 // 4. кнопки бустов: подписей нет, значок и цена помещаются внутрь
 const barCfg = CONFIG.ui.boostBar;
-check('значок и цена внутри кнопки',
-  barCfg.iconY - barCfg.iconSize / 2 > 0 && barCfg.priceY + 10 < barCfg.h &&
-  barCfg.iconY + barCfg.iconSize / 2 < barCfg.priceY);
+// Phase 33: цена уехала под кнопку, значок занимает всю плашку
+check('значок помещается в плашку',
+  barCfg.h * barCfg.iconScale < barCfg.h && barCfg.h * barCfg.iconScale < barCfg.w,
+  'значок ' + (barCfg.h * barCfg.iconScale).toFixed(0) + ' при плашке ' +
+  barCfg.w + '×' + barCfg.h);
+check('цена стоит под кнопкой, а не внутри неё', barCfg.priceGap > 0);
+check('строка цены не вылезает за нижний край канваса',
+  barCfg.y + barCfg.h + barCfg.priceGap + barCfg.priceSize / 2 <= CONFIG.canvas.height,
+  'низ цены ' + (barCfg.y + barCfg.h + barCfg.priceGap + barCfg.priceSize / 2));
 check('подписей на кнопках бустов больше нет',
   !/boost\.label/.test(render.drawBoostBar.toString()));
 check('кнопки бустов не наезжают на нижний край канваса',
@@ -934,6 +973,40 @@ try {
 }
 check('кадр с открытым экраном настроек рисуется', settingsDrawOk);
 closeSettings(GameState);
+
+// 11. нижний ряд экрана: «Перезапустить» и «Назад» (Phase 32)
+const rowRestart = render.settingsRestartRect();
+const rowBack = render.settingsBackRect();
+check('кнопки ряда не пересекаются и стоят на одной высоте',
+  rowRestart.x + rowRestart.w < rowBack.x &&
+  rowRestart.y === rowBack.y && rowRestart.h === rowBack.h,
+  JSON.stringify(rowRestart) + ' / ' + JSON.stringify(rowBack));
+check('ряд помещается по ширине канваса',
+  rowRestart.x >= 0 && rowBack.x + rowBack.w <= CONFIG.canvas.width,
+  'с ' + rowRestart.x + ' по ' + (rowBack.x + rowBack.w));
+
+// «Перезапустить»: партия с нуля и экран закрыт одним нажатием
+setBoard({ '0,0': rep(0, 3), '1,0': rep(1, 2) });
+GameState.score = 777;
+openSettings(GameState);
+fire('pointerdown', rowRestart.x + rowRestart.w / 2, rowRestart.y + rowRestart.h / 2);
+check('кнопка «Перезапустить» начинает партию заново',
+  GameState.score === 0 && !GameState.isGameOver, 'score=' + GameState.score);
+check('кнопка «Перезапустить» закрывает меню', GameState.settings === null);
+
+// «Назад» рядом с ней партию не трогает
+GameState.score = 555;
+openSettings(GameState);
+fire('pointerdown', rowBack.x + rowBack.w / 2, rowBack.y + rowBack.h / 2);
+check('кнопка «Назад» закрывает экран кликом', GameState.settings === null);
+check('«Назад» партию не перезапускает', GameState.score === 555,
+  'score=' + GameState.score);
+
+// клавиша R из открытого меню: и перезапускает, и закрывает экран
+openSettings(GameState);
+windowHandlers.keydown({ code: 'KeyR' });
+check('R из открытого меню перезапускает партию и закрывает его',
+  GameState.settings === null && GameState.score === 0);
 
 // возвращаем звук к исходному состоянию: дальше идут проверки музыки
 applySettings({ sfx: 1, music: 1, haptics: true });
@@ -1147,6 +1220,32 @@ vibrations.length = 0;
 input.placeStack(GameState, { tiles: [0], cell: null }, cell('0,-1'));
 check('крупное сгорание отдаёт вибрацией', vibrations.length > 0,
   'вызовов=' + vibrations.length);
+check('у крупного сгорания отдача сильная',
+  vibrations[0] === CONFIG.haptics.burnBig, 'пришло ' + vibrations[0]);
+
+// Phase 35: до неё отвечал только блок от 15 фишек, и при пороге 10-12 телефон
+// в обычной партии молчал
+setBoardForBurn();
+vibrations.length = 0;
+playBurnMove();
+check('обычное сгорание тоже отдаёт, но мягче',
+  vibrations[0] === CONFIG.haptics.burnSmall &&
+  CONFIG.haptics.burnSmall < CONFIG.haptics.burnBig, 'пришло ' + vibrations[0]);
+
+check('длинная цепочка ощущается длиннее короткой',
+  CONFIG.haptics.comboLong.length > CONFIG.haptics.combo.length &&
+  CONFIG.haptics.comboLongFrom > 2);
+
+// отказ действия: звук и короткая вибрация собраны в одном месте
+restart();
+GameState.coins = 0;
+vibrations.length = 0;
+input.toggleBoost(GameState, 'move');            // монет не хватает — отказ
+check('отказ действия отдаёт коротко',
+  vibrations.length === 1 && vibrations[0] === CONFIG.haptics.deny,
+  'вызовов=' + vibrations.length + ' пришло ' + vibrations[0]);
+check('отказ — самая слабая отдача из всех',
+  CONFIG.haptics.deny < CONFIG.haptics.burnSmall);
 restart();
 
 console.log('\n--- Phase 17: звук ---');
@@ -1279,10 +1378,58 @@ render.drawAll(GameState);
 check('кадр в середине перелёта буста рисуется без ошибок', true);
 GameState.boostAnim = null;
 
+// 1b. свап (Phase 31): целью может быть и занятая ячейка — тогда стопки меняются
+// местами. Ячейки взяты не соседние и цвета разные, иначе слияние спутало бы итог.
+setBoard({ '1,-1': rep(0, 3), '-2,2': rep(1, 2) });
+GameState.coins = 500;
+const swapA = cell('1,-1');
+const swapB = cell('-2,2');
+const stackA = swapA.stack;
+const stackB = swapB.stack;
+input.toggleBoost(GameState, 'move');
+input.applyBoostTo(GameState, swapA);
+check('занятая ячейка годится целью свапа', input.isBoostTarget(GameState, swapB));
+check('источник сам себе целью не годится', !input.isBoostTarget(GameState, swapA));
+input.applyBoostTo(GameState, swapB);
+check('стопки поменялись местами',
+  swapA.stack === stackB && swapB.stack === stackA);
+check('обе стопки знают свою новую ячейку',
+  stackA.cell.q === swapB.q && stackA.cell.r === swapB.r &&
+  stackB.cell.q === swapA.q && stackB.cell.r === swapA.r);
+check('за свап списана та же цена, что и за перенос',
+  GameState.coins === 500 - input.boostConfig('move').cost, 'coins=' + GameState.coins);
+
+// перелётов при обмене два, и вторая дуга уходит в другую сторону — иначе стопки
+// прошли бы одна сквозь другую
+const swapFlight = input.boostFlight([
+  { tiles: rep(0, 3), from: swapA, to: swapB },
+  { tiles: rep(1, 2), from: swapB, to: swapA }
+]);
+check('при обмене прячутся обе ячейки',
+  swapFlight.hide.has(hexMath.key(swapA.q, swapA.r)) &&
+  swapFlight.hide.has(hexMath.key(swapB.q, swapB.r)));
+GameState.boostAnim = swapFlight;
+GameState.boostAnim.t = 0.5;
+render.drawAll(GameState);
+check('кадр в середине обмена рисуется без ошибок', true);
+GameState.boostAnim = null;
+
+// волна обязана пойти от обеих ячеек: сгорание собирается у ячейки-ИСТОЧНИКА,
+// куда приехала вторая стопка, — при старте только от цели его бы не было
+// у источника и его соседа вместе ровно порог: обмен приносит блок к '0,0'
+setBoard({ '0,0': rep(0, 3), '2,0': rep(1, BURN_THRESHOLD - 5), '0,-1': rep(1, 5) });
+GameState.coins = 500;
+input.toggleBoost(GameState, 'move');
+input.applyBoostTo(GameState, cell('0,0'));
+input.applyBoostTo(GameState, cell('2,0'));
+check('после обмена волна идёт и от ячейки-источника',
+  GameState.score > 0 && cell('0,0').stack === null && cell('0,-1').stack === null,
+  'score=' + GameState.score);
+
 // 2. «убрать» рассыпает стопку осколками, а не гасит её молча
 restart();
 GameState.coins = 500;
-GameState.fx = { particles: [], floats: [], shake: null, press: null };
+GameState.fx = { particles: [], rings: [], floats: [], shake: null, press: null };
 const removeCell = cell('1,-1');
 removeCell.stack = { tiles: rep(0, 4), cell: { q: 1, r: -1 } };
 input.toggleBoost(GameState, 'remove');
@@ -1299,7 +1446,7 @@ input.applyBoostTo(GameState, removeCell);
 check('буст «убрать» очистил ячейку', removeCell.stack === null);
 check('буст «убрать» рассыпал стопку на осколки',
   scattered === 4 * CONFIG.animation.boostScatterPerTile, 'осколков ' + scattered);
-GameState.fx = { particles: [], floats: [], shake: null, press: null };
+GameState.fx = { particles: [], rings: [], floats: [], shake: null, press: null };
 
 // 3. комбо: цепочка из двух сгораний платит бонусом, из одного — нет
 restart();
@@ -1324,10 +1471,11 @@ check('ease.outCubic тормозит к концу',
 check('ease.outBack перелетает единицу и возвращается',
   Math.abs(render.ease.outBack(1) - 1) < 1e-9 && render.ease.outBack(0.78) > 1);
 
-// 2. скорость доворота поля переехала в animation — раньше ключа не было вовсе
-// и код молча падал на фолбэк CONFIG.camera.snapMs
-check('CONFIG.animation.snapMs задан', CONFIG.animation.snapMs > 0);
-check('CONFIG.camera.snapMs больше не нужен', CONFIG.camera.snapMs === undefined);
+// 2. отдельной длительности у доворота больше нет (Phase 34): угол всегда
+// догоняет camera.target, поэтому скорость доворота — это followMs камеры
+check('доворот идёт той же скоростью, что и слежение за пальцем',
+  CONFIG.camera.followMs > 0 && CONFIG.animation.snapMs === undefined &&
+  CONFIG.camera.snapMs === undefined);
 
 // 3. цикл эффектов завершается сам и догоняет счётчики.
 // Это главный инвариант: живой эффект держит RAF, и незавершённый цикл
@@ -1338,28 +1486,65 @@ GameState.score = 0;
 GameState.coins = 0;
 playBurnMove();
 check('после сгорания счёт на экране догнал настоящий',
-  GameState.scoreShown === GameState.score && GameState.score === 10,
+  GameState.scoreShown === GameState.score && GameState.score === BURN_POINTS,
   'shown=' + GameState.scoreShown + ' score=' + GameState.score);
 check('кошелёк на экране догнал настоящий',
   GameState.coinsShown === GameState.coins, 'shown=' + GameState.coinsShown);
 check('эффекты погасли и больше не держат кадр',
   GameState.fx.particles.length === 0 && GameState.fx.floats.length === 0 &&
-  GameState.fx.shake === null);
+  GameState.fx.rings.length === 0 && GameState.fx.shake === null);
+
+// Phase 35: сила события считается от размера блока, а не только от цепочки —
+// раньше блок из 10 и из 25 фишек рассыпался одинаково. Смотрим на порождение
+// эффектов напрямую: живой цикл гасит их в тот же кадр.
+const fxProbe = (count, combo) => {
+  GameState.fx = { particles: [], rings: [], floats: [], shake: null, press: null };
+  spawnBurnFx(GameState, { cell: cell('0,0'), color: 0, count, points: count }, combo);
+  return {
+    particles: GameState.fx.particles.length,
+    ring: GameState.fx.rings[0],
+    shake: GameState.fx.shake
+  };
+};
+const smallBurn = fxProbe(10, 1);
+const bigBurn = fxProbe(25, 1);
+const comboBurn = fxProbe(10, 3);
+check('крупный блок даёт заметно больше осколков',
+  bigBurn.particles > smallBurn.particles * 1.5,
+  smallBurn.particles + ' → ' + bigBurn.particles);
+check('длинная цепочка тоже добавляет осколков',
+  comboBurn.particles > smallBurn.particles,
+  smallBurn.particles + ' → ' + comboBurn.particles);
+check('осколков не больше потолка: сотни частиц кладут телефон',
+  fxProbe(200, 5).particles <= CONFIG.animation.particlesMax,
+  'при блоке 200 — ' + fxProbe(200, 5).particles);
+check('ударная волна появляется на каждом сгорании и сильнее у крупного',
+  !!smallBurn.ring && bigBurn.ring.power > smallBurn.ring.power,
+  smallBurn.ring.power.toFixed(2) + ' → ' + bigBurn.ring.power.toFixed(2));
+check('тряска у крупного блока размашистее, чем у минимального',
+  bigBurn.shake && bigBurn.shake.amp > CONFIG.animation.shakeAmp &&
+  bigBurn.shake.amp <= CONFIG.animation.shakeAmpMax,
+  'амплитуда ' + (bigBurn.shake ? bigBurn.shake.amp.toFixed(1) : '—'));
+check('минимальное одиночное сгорание поле не трясёт', smallBurn.shake === null);
+GameState.fx = { particles: [], rings: [], floats: [], shake: null, press: null };
 
 // 4. кадр с живыми эффектами рисуется без ошибок
 const fxCell = cell('0,0');
 GameState.fx.particles.push({ cell: fxCell, color: 0, age: 0, vx: 40, vy: -60 });
 GameState.fx.floats.push({ cell: fxCell, text: '+16', age: 0 });
-GameState.fx.shake = { age: 0 };
+GameState.fx.rings.push({ cell: fxCell, color: 0, age: 0, power: 2 });
+GameState.fx.shake = { age: 0, amp: 14 };
 render.drawAll(GameState);
-check('кадр с осколками, «+N» и тряской рисуется без ошибок', true);
+check('кадр с осколками, волной, «+N» и тряской рисуется без ошибок', true);
+check('ударная волна живёт меньше секунды — иначе цикл juice не умрёт за кадр',
+  CONFIG.animation.ringMs < 1000, CONFIG.animation.ringMs + ' мс');
 
 // 5. тряска затухает и без эффекта не смещает поле
 const shakeStart = Math.abs(render.shakeOffset(GameState).x);
 GameState.fx.shake = { age: CONFIG.animation.shakeMs };
 check('тряска затухает к концу',
   Math.abs(render.shakeOffset(GameState).x) <= shakeStart);
-GameState.fx = { particles: [], floats: [], shake: null, press: null };
+GameState.fx = { particles: [], rings: [], floats: [], shake: null, press: null };
 check('без тряски смещение нулевое',
   render.shakeOffset(GameState).x === 0 && render.shakeOffset(GameState).y === 0);
 
@@ -1459,7 +1644,8 @@ themeNames.forEach(name => {
   GameState.coins = 0;
   playBurnMove();
   check(`в теме «${THEMES[name].name}» ход проходит и блок сгорает`,
-    GameState.score === 10 && GameState.coins === mergeEngine.burnCoinsFor(10),
+    GameState.score === BURN_POINTS &&
+    GameState.coins === mergeEngine.burnCoinsFor(BURN_THRESHOLD),
     'score=' + GameState.score);
   render.drawAll(GameState);          // отрисовка не должна падать
   check(`в теме «${THEMES[name].name}» полный кадр рисуется без ошибок`, true);
@@ -1539,16 +1725,20 @@ check('стопка переехала в выбранную ячейку',
 check('цена переноса списана', GameState.coins === 100 - boostOf('move').cost);
 check('stack.cell обновлён', cell('2,0').stack.cell.q === 2 && cell('2,0').stack.cell.r === 0);
 
-// 6. «Перенос» запускает волну: переставили к одноцветной — блок собрался и сгорел
-setBoard({ '2,-2': rep(0, 8), '1,0': rep(0, 2), '0,-1': rep(0, 1) });
+// 6. «Перенос» запускает волну: переставили к одноцветной — блок собрался и сгорел.
+// Блок берём на одну фишку выше порога: так проверяется и повышенная ставка за
+// фишку сверх него, и независимость теста от самого порога (он число баланса).
+const moveBurnSize = BURN_THRESHOLD + 1;
+setBoard({ '2,-2': rep(0, moveBurnSize - 3), '1,0': rep(0, 2), '0,-1': rep(0, 1) });
 GameState.coins = 100;
 GameState.score = 0;
 clickBoost('move');
 clickCell(cell('2,-2'));      // источник — большая стопка
 clickCell(cell('0,0'));       // ставим в центр, рядом с двумя одноцветными
-check('перенос собрал блок 11 и он сгорел (10 + 1*2 = 12 очков)',
-  GameState.score === 12 && cell('0,0').stack === null,
-  'score=' + GameState.score + ' ' + dump());
+check('перенос собрал блок сверх порога и он сгорел по повышенной ставке',
+  GameState.score === mergeEngine.burnPointsFor(moveBurnSize) &&
+  GameState.score > BURN_POINTS && cell('0,0').stack === null,
+  'score=' + GameState.score + ' ждали ' + mergeEngine.burnPointsFor(moveBurnSize));
 
 // 7. «Пересдача»: рука меняется целиком, ячейку выбирать не надо (Phase 17).
 // Заменила «Обмен», который решал ту же задачу, что и «Перенос», — переставить стопки.
@@ -1845,9 +2035,11 @@ check('стопка нарисована в экранной позиции по
 resetCamera(GameState);
 restart();
 
-// 9. зума больше нет
-check('в состоянии камеры остался только поворот',
-  Object.keys(GameState.camera).join() === 'rotation', Object.keys(GameState.camera).join());
+// 9. зума больше нет. В камере только поворот: видимый угол, цель под пальцем и
+// инерция (Phase 34) — ни масштаба, ни смещения
+check('в состоянии камеры только поворот, цель и инерция',
+  Object.keys(GameState.camera).join() === 'rotation,target,velocity',
+  Object.keys(GameState.camera).join());
 check('обработчика колеса нет', handlers.wheel === undefined);
 check('в CONFIG нет параметров зума',
   CONFIG.camera.minScale === undefined && CONFIG.camera.maxScale === undefined);
@@ -1898,13 +2090,14 @@ check('сосед с другим верхним цветом не выбира�
   mergeEngine.mergeTargetFor(GameState, cell('0,0')) === cell('1,0'),
   'верхние блоки совпадают по цвету 1 — сосед подходит');
 
-// 5. соседи точки сбора стекаются в неё все сразу: 4 + 2 + 2 + 2 = 10
+// 5. соседи точки сбора стекаются в неё все сразу и дают ровно порог
 setBoardForBurn();
 GameState.score = 0;
 GameState.coins = 0;
 playBurnMove();
 check('одноцветные соседи точки сбора собрались в неё и блок сгорел',
-  GameState.score === 10 && GameState.coins === mergeEngine.burnCoinsFor(10),
+  GameState.score === BURN_POINTS &&
+  GameState.coins === mergeEngine.burnCoinsFor(BURN_THRESHOLD),
   'score=' + GameState.score + ' coins=' + GameState.coins);
 check('после сгорания все четыре ячейки свободны',
   ['0,0', '1,0', '1,-1', '0,-1'].every(k => cell(k).stack === null), dump());
@@ -1996,6 +2189,12 @@ check('потолок радиуса держится',
       minY = Math.min(minY, p.y); maxY = Math.max(maxY, p.y);
     });
   });
+  // Phase 33: запас снизу обязателен — мир обрезается по boardArea.bottom, и поле,
+  // положенное ровно на границу, теряло у нижнего ряда обводку с тенью
+  check(`R=${radius}: между полем и нижней границей есть зазор`,
+    maxY <= CONFIG.ui.boardArea.bottom - CONFIG.ui.boardArea.bottomPad + 0.5,
+    `низ поля ${maxY.toFixed(0)} при границе ${CONFIG.ui.boardArea.bottom} ` +
+    `и зазоре ${CONFIG.ui.boardArea.bottomPad}`);
   check(`R=${radius}: поле внутри канваса и не задевает HUD/руку`,
     minX >= 0 && maxX <= CONFIG.canvas.width &&
     minY >= CONFIG.ui.boardArea.top - 1 && maxY <= CONFIG.ui.boardArea.bottom + 1,
@@ -2311,20 +2510,21 @@ check('собрали 8 фишек в стопку без сгорания — �
 // 3. номер волны на очки не влияет: одинаковый блок в волне 1 и в волне 2
 setBoard({ '1,0': rep(0, 3), '1,-1': rep(0, 3), '0,-1': rep(0, 3) });
 const wave1 = mergeEngine.resolveWave(GameState, (() => {
-  cell('0,0').stack = { tiles: [0], cell: { q: 0, r: 0 } };
+  // в ячейку игрока кладём столько, чтобы вместе с тремя соседями вышел порог
+  cell('0,0').stack = { tiles: rep(0, BURN_THRESHOLD - 9), cell: { q: 0, r: 0 } };
   return cell('0,0');
 })());
 setBoard({
-  '0,0': rep(1, 9).concat([0]),
+  '0,0': rep(1, BURN_THRESHOLD - 1).concat(rep(0, BURN_THRESHOLD - 9)),
   '1,0': rep(0, 3), '1,-1': rep(0, 3), '0,-1': rep(0, 3),
   '-1,0': [1]
 });
 const chain = mergeEngine.resolveWave(GameState, cell('0,0'));
-check('блок из 10 даёт 10 очков и в первой, и во второй волне',
-  chain.steps[0].points === 10 && chain.steps[1].points === 10,
+check('блок в порог даёт свои очки и в первой, и во второй волне',
+  chain.steps[0].points === BURN_POINTS && chain.steps[1].points === BURN_POINTS,
   JSON.stringify(chain.steps));
-check('одиночное сгорание в первой волне тоже 10',
-  wave1.steps[0].points === 10, JSON.stringify(wave1.steps));
+check('одиночное сгорание в первой волне даёт столько же',
+  wave1.steps[0].points === BURN_POINTS, JSON.stringify(wave1.steps));
 
 // 4. кошелёк: начисляется в живой игре, пишется через Platform, переживает restart
 delete store[CONFIG.storage.coinsKey];
@@ -2524,28 +2724,26 @@ check('самый крупный блок партии записан',
   GameState.runStats.biggestBlock >= mergeEngine.thresholdFor(0),
   'блок ' + GameState.runStats.biggestBlock);
 
-// 4. экран статистики открывается с оверлея конца и закрывается «Назад»
+// 4. счётчики за всё время показываются на экране лиги (Phase 37): отдельного
+// экрана статистики больше нет — оверлей конца не выдерживал четвёртой кнопки
 restart();
 GameState.isGameOver = true;
-const statsBtn = render.statsButtonRect();
-fire('pointerdown', statsBtn.x + statsBtn.w / 2, statsBtn.y + statsBtn.h / 2);
-check('кнопка «Статистика» открывает экран',
-  GameState.stats !== null && GameState.stats.open === true);
-check('на экране лежат прочитанные данные, а не ссылка на хранилище',
-  GameState.stats.data && typeof GameState.stats.data.games === 'number');
+const leagueBadge = render.leagueBadgeRect();
+fire('pointerdown', leagueBadge.x + leagueBadge.w / 2, leagueBadge.y + leagueBadge.h / 2);
+check('плашка лиги открывает экран',
+  GameState.leaderboard !== null && GameState.leaderboard.open === true);
+check('на экране лежат прочитанные счётчики, а не ссылка на хранилище',
+  GameState.leaderboard.stats && typeof GameState.leaderboard.stats.games === 'number');
 render.drawAll(GameState);                // отрисовка экрана не должна падать
-const statsBack = render.restartButtonRect();
-fire('pointerdown', statsBack.x + statsBack.w / 2, statsBack.y + statsBack.h / 2);
-check('кнопка «Назад» закрывает статистику', GameState.stats === null);
+const leagueBack = render.restartButtonRect();
+fire('pointerdown', leagueBack.x + leagueBack.w / 2, leagueBack.y + leagueBack.h / 2);
+check('кнопка «Назад» закрывает экран лиги', GameState.leaderboard.open === false);
 check('партия при этом не перезапустилась', GameState.isGameOver === true);
-check('кнопки «Рейтинг» и «Статистика» не пересекаются',
-  render.leaderboardButtonRect().x + render.leaderboardButtonRect().w <=
-  render.statsButtonRect().x);
-check('обе кнопки выше кнопки «Заново»',
-  render.statsButtonRect().y + render.statsButtonRect().h <= render.restartButtonRect().y);
-openStats(GameState);
-windowHandlers.keydown({ code: 'Escape' });
-check('Esc закрывает экран статистики', GameState.stats === null);
+check('кнопки статистики на оверлее больше нет',
+  render.statsButtonRect === undefined);
+check('«Рейтинг» стоит над рядом «Возрождение» и «Заново»',
+  render.leaderboardButtonRect().y + render.leaderboardButtonRect().h <=
+  render.reviveButtonRect().y);
 restart();
 
 // 5. отклик нажатия: кнопка вдавливается и отходит сама
@@ -2579,8 +2777,9 @@ console.log('\n--- Phase 29: волна не роняет партию ---');
 //      и та остаётся без стопки;
 //   4) commitWave доливает фишки в «1,-1» — раньше здесь партия падала с
 //      «Cannot read properties of null».
+// высота центра — от порога: нулей должно набраться ровно на сгорание
 setBoard({
-  '1,-1': rep(0, 6),
+  '1,-1': rep(0, BURN_THRESHOLD - 4),
   '2,-1': rep(0, 2),
   '1,-2': [0, 0, 3, 3],
   '2,-2': [4, 4, 3, 3, 3, 3]
@@ -2753,6 +2952,12 @@ check('очень длинный экран упирается в потолок
 const tallHeight = layoutCfg.maxHeight;
 const scoreYBefore = CONFIG.ui.scoreY;
 const handYBefore = CONFIG.ui.handY;
+// снимки базовых размеров: после переразметки они станут больше (Phase 33)
+const uiTallBase = {
+  handHexSize: CONFIG.ui.handHexSize,
+  boostH: CONFIG.ui.boostBar.h
+};
+const baseHexSize = hexMath.fitLayout(2).size;
 layoutUi(tallHeight);
 check('счёт остаётся привязан к верху', CONFIG.ui.scoreY === scoreYBefore);
 check('рука опустилась вместе с низом канваса', CONFIG.ui.handY > handYBefore);
@@ -2785,6 +2990,25 @@ check('строки настроек уехали к центру нового �
 check('на вытянутом экране гекс не мельче, чем на базовом',
   hexMath.fitLayout(4).size >= 33);
 
+// Phase 33: низ растёт вместе с высотой — на телефоне кнопка буста была около
+// 35 реальных пикселей, пальцем не попасть
+const tallScale = CONFIG.ui.handHexSize / uiTallBase.handHexSize;
+check('рука и кнопки бустов на вытянутом экране крупнее базовых',
+  tallScale > 1.2 && CONFIG.ui.boostBar.h > uiTallBase.boostH,
+  'масштаб ' + tallScale.toFixed(2));
+check('масштаб низа зажат потолком', tallScale <= CONFIG.ui.layout.maxUiScale + 0.001);
+check('увеличенные рука и бусты не вылезают за ширину канваса',
+  2 * CONFIG.ui.handSlotSpacing + 2 * CONFIG.ui.handHexSize <= CONFIG.canvas.width &&
+  3 * CONFIG.ui.boostBar.w + 2 * CONFIG.ui.boostBar.gap <= CONFIG.canvas.width,
+  'рука ' + (2 * CONFIG.ui.handSlotSpacing + 2 * CONFIG.ui.handHexSize).toFixed(0) +
+  ', бусты ' + (3 * CONFIG.ui.boostBar.w + 2 * CONFIG.ui.boostBar.gap).toFixed(0));
+check('строка цены на вытянутом экране внутри канваса',
+  CONFIG.ui.boostBar.y + CONFIG.ui.boostBar.h + CONFIG.ui.boostBar.priceGap +
+  CONFIG.ui.boostBar.priceSize / 2 <= tallHeight);
+check('на вытянутом экране поле заметно крупнее базового',
+  hexMath.fitLayout(2).size > baseHexSize * 1.3,
+  'было ' + baseHexSize.toFixed(1) + ', стало ' + hexMath.fitLayout(2).size.toFixed(1));
+
 // рука по-прежнему ловит палец после переразметки
 restart();
 const tallSlotCenter = render.handSlotCenter(1);
@@ -2800,6 +3024,169 @@ check('возврат к базовой высоте восстанавлива�
 
 // 4. Замер кадра — инструмент разработки, по умолчанию выключен
 check('замер кадра по умолчанию выключен', render.fpsMeter.on === false);
+
+console.log('\n--- Phase 34: плавность движений ---');
+
+// 1. слияние идёт по одной фишке: длительность шага растёт с высотой стайки
+const animCfg = CONFIG.animation;
+const durationOf = (count) => flowDuration([{ count }]);
+check('шаг волны для одной фишки — это её полёт',
+  durationOf(1) === animCfg.flowTravelMs, durationOf(1) + ' мс');
+check('каждая следующая фишка добавляет свою задержку',
+  durationOf(5) - durationOf(4) === animCfg.flowStepMs &&
+  durationOf(5) === animCfg.flowTravelMs + 4 * animCfg.flowStepMs,
+  '5 фишек — ' + durationOf(5) + ' мс');
+check('длительность зажата потолком: в тестах часы прыгают на секунду за кадр',
+  durationOf(40) === animCfg.flowMaxMs && animCfg.flowMaxMs < 1000,
+  durationOf(40) + ' мс');
+check('длительность считается по самой высокой стайке волны',
+  flowDuration([{ count: 2 }, { count: 6 }, { count: 3 }]) === durationOf(6));
+
+// 2. поворот: палец ведёт цель, видимый угол её догоняет и защёлкивается
+restart();
+resetCamera(GameState);
+// layout пересоздаётся в fitLayout, поэтому берём его текущий, а не снимок
+const spinFrom = { x: hexMath.layout.centerX + 150, y: hexMath.layout.centerY };
+fire('pointerdown', spinFrom.x, spinFrom.y);
+fire('pointermove', spinFrom.x + 40, spinFrom.y + 40);      // открыть жест
+fire('pointermove', spinFrom.x + 40, spinFrom.y + 120);
+check('палец двигает цель камеры, а не сам угол напрямую',
+  GameState.camera.target !== 0, 'цель ' + deg(GameState.camera.target).toFixed(1) + '°');
+check('видимый угол догнал цель и защёлкнулся',
+  GameState.camera.rotation === GameState.camera.target,
+  'угол ' + deg(GameState.camera.rotation).toFixed(3) +
+  '° при цели ' + deg(GameState.camera.target).toFixed(3) + '°');
+fire('pointerup', spinFrom.x + 40, spinFrom.y + 120);
+check('после отпускания инерция гаснет и поле встаёт на грань',
+  GameState.camera.velocity === 0 &&
+  Math.abs(GameState.camera.rotation - nearestSnapAngle(GameState.camera.rotation)) < 1e-9,
+  'угол ' + deg(GameState.camera.rotation).toFixed(1) + '°');
+check('доворот ведёт цель вместе с углом — два цикла не спорят за поворот',
+  GameState.camera.target === GameState.camera.rotation);
+resetCamera(GameState);
+check('resetCamera гасит и цель, и инерцию',
+  GameState.camera.target === 0 && GameState.camera.velocity === 0);
+
+// 3. перетаскивание: картинка отстаёт, логика считается по пальцу
+restart();
+setBoard({});
+const smoothSlot = filledSlot();
+const smoothCenter = render.handSlotCenter(smoothSlot);
+fire('pointerdown', smoothCenter.x, smoothCenter.y);
+check('взятая стопка нарисована ровно под пальцем, без прилёта издалека',
+  GameState.drag.shownX === GameState.drag.x &&
+  GameState.drag.shownY === GameState.drag.y);
+const smoothTarget = anyFreeCell();
+fire('pointermove', smoothTarget.pixelX, smoothTarget.pixelY + lift);
+check('ячейка под стопкой считается по пальцу, а не по догоняющей картинке',
+  GameState.hoverKey === hexMath.key(smoothTarget.q, smoothTarget.r),
+  'подсвечено ' + GameState.hoverKey);
+check('картинка стопки догоняет палец и защёлкивается',
+  GameState.drag.shownX === GameState.drag.x &&
+  GameState.drag.shownY === GameState.drag.y);
+fire('pointerup', smoothTarget.pixelX, smoothTarget.pixelY + lift);
+check('стопка легла в ту ячейку, где был палец',
+  smoothTarget.stack !== null && GameState.drag === null);
+
+console.log('\n--- Phase 37: лига, возрождение и новый HUD ---');
+
+// 1. возрождение: половина стопок уходит, счёт остаётся
+const fillBoardForRevive = () => {
+  restart();
+  const spec = {};
+  // забиваем поле так, чтобы соседи были разных цветов и волна ничего не собрала
+  let i = 0;
+  GameState.cells.forEach((c, key) => { spec[key] = rep(i++ % 3, 2); });
+  setBoard(spec);
+  GameState.isGameOver = true;
+  GameState.score = 1234;
+};
+fillBoardForRevive();
+GameState.coins = 1000;
+const occupiedBefore = Array.from(GameState.cells.values()).filter(c => c.stack).length;
+const coinsBefore = GameState.coins;
+check('возрождение доступно, когда монет хватает', canRevive(GameState) === true);
+check('первое возрождение стоит первую ступень цены',
+  reviveCost(GameState) === CONFIG.revive.costs[0], 'цена ' + reviveCost(GameState));
+revive(GameState);
+const occupiedAfter = Array.from(GameState.cells.values()).filter(c => c.stack).length;
+check('возрождение убрало половину стопок',
+  occupiedAfter === occupiedBefore - Math.ceil(occupiedBefore * CONFIG.revive.clearShare),
+  occupiedBefore + ' -> ' + occupiedAfter);
+check('счёт и партия сохранились, поражение снято',
+  GameState.score === 1234 && GameState.isGameOver === false);
+check('монеты списаны ровно по цене',
+  GameState.coins === coinsBefore - CONFIG.revive.costs[0], 'coins=' + GameState.coins);
+check('рука после возрождения полна', GameState.hand.slots.every(s => s !== null));
+check('второе возрождение дороже первого',
+  reviveCost(GameState) === CONFIG.revive.costs[1] &&
+  CONFIG.revive.costs[1] > CONFIG.revive.costs[0]);
+check('новая партия обнуляет счётчик возрождений',
+  (() => { restart(); return GameState.revivesUsed === 0; })());
+
+// не хватило монет — ничего не происходит
+fillBoardForRevive();
+GameState.coins = CONFIG.revive.costs[0] - 1;
+check('без монет возрождение недоступно', canRevive(GameState) === false);
+const boardBeforeDeny = Array.from(GameState.cells.values()).filter(c => c.stack).length;
+revive(GameState);
+check('без монет поле и поражение не тронуты',
+  GameState.isGameOver === true &&
+  Array.from(GameState.cells.values()).filter(c => c.stack).length === boardBeforeDeny &&
+  GameState.coins === CONFIG.revive.costs[0] - 1);
+restart();
+
+// 2. лига: дивизион растёт по порогам личного рекорда
+const tiers = CONFIG.league.tiers;
+check('дивизионы заданы по возрастанию рекорда',
+  tiers.every((step, i) => i === 0 || step.fromBest > tiers[i - 1].fromBest));
+check('нулевой рекорд — первый дивизион',
+  leagueTier(0).key === tiers[0].key);
+check('высокий рекорд — последний дивизион',
+  leagueTier(tiers[tiers.length - 1].fromBest + 1000).key === tiers[tiers.length - 1].key);
+check('у каждого дивизиона есть название в обоих словарях',
+  tiers.every(step => I18N.ru[step.key] && I18N.en[step.key]));
+GameState.best = tiers[1].fromBest;
+GameState.league = null;
+check('без лидерборда плашка показывает дивизион',
+  leagueLabel(GameState) === t(tiers[1].key), leagueLabel(GameState));
+GameState.league = { rank: 42 };
+check('с лидербордом плашка показывает место',
+  leagueLabel(GameState) === t('leagueRank') + '42', leagueLabel(GameState));
+GameState.league = null;
+
+// 3. новая разметка: рекорд слева, лига справа, шестерёнка в ряду бустов
+const badge = render.leagueBadgeRect();
+check('плашка лиги внутри канваса и правее счёта',
+  badge.x + badge.w <= CONFIG.canvas.width &&
+  badge.x > CONFIG.canvas.width / 2 + CONFIG.ui.scoreIconSize);
+check('монеты под строкой рекорда, а не рядом с ней',
+  CONFIG.ui.coinsY > CONFIG.ui.bestY);
+const gearNow = render.settingsButtonRect();
+const lastBoost = render.boostButtonRect(CONFIG.boosts.length - 1);
+check('шестерёнка стоит в ряду бустов, не наезжая на них',
+  gearNow.x >= lastBoost.x + lastBoost.w && gearNow.y === lastBoost.y &&
+  gearNow.x + gearNow.w <= CONFIG.canvas.width,
+  JSON.stringify(gearNow));
+check('шестерёнка не спорит с кнопкой возврата поворота',
+  render.resetCameraButtonRect().y + render.resetCameraButtonRect().h <= gearNow.y);
+
+// 4. оверлей конца: три кнопки, ничего не пересекается
+restart();
+GameState.isGameOver = true;
+const rev = render.reviveButtonRect();
+const again = render.restartHalfRect();
+const lb = render.leaderboardButtonRect();
+check('«Возрождение» и «Заново» делят ряд и не пересекаются',
+  rev.x + rev.w < again.x && rev.y === again.y);
+check('весь ряд помещается по ширине',
+  rev.x >= 0 && again.x + again.w <= CONFIG.canvas.width);
+check('«Рейтинг» стоит выше ряда и внутри канваса',
+  lb.y + lb.h <= rev.y && lb.x >= 0 && lb.x + lb.w <= CONFIG.canvas.width);
+let gameOverDrawOk = true;
+try { render.drawAll(GameState); } catch (e) { gameOverDrawOk = false; }
+check('кадр оверлея конца с новой кнопкой рисуется', gameOverDrawOk);
+restart();
 
 // Проверки рейтинга вынесены в конец и выполняются асинхронно: fetchLeaderboard
 // возвращает промис, а в Node он резолвится не раньше следующего микротаска.

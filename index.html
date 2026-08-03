@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="ru">
 <head>
 <meta charset="utf-8">
@@ -75,7 +75,10 @@ const CONFIG = {
                  { fromScore: 4500, radius: 4, colors: 9  },   // третье кольцо
                  { fromScore: 6000, radius: 4, colors: 10 }
                ] },
-  hex:       { orientation: 'flat', maxSize: 55 },
+  // maxSize — предохранитель, а не рабочее ограничение: реально размер гекса задаёт
+  // ширина коридора (availWidth / (3R+2) — это 85 при R=2). Пока потолок стоял на 55,
+  // на высоком экране телефона поле переставало расти и под ним висела пустота.
+  hex:       { orientation: 'flat', maxSize: 88 },
   // Ступени стопок. Состав руки за партию **переворачивается**: начинается с
   // простых одноцветных, заканчивается четырёхцветными (схема пользователя,
   // Phase 28). Раньше лестница замирала на 500 очках навсегда, и вторая половина
@@ -101,10 +104,16 @@ const CONFIG = {
   // Порог сгорания тоже растёт (Phase 28): к концу партии собрать блок труднее.
   // Очки при этом по-прежнему считаются от scoring.burnBaseTiles, поэтому
   // сгорание при поднятом пороге сразу даёт больше базовой ставки.
+  //
+  // Phase 36: лестница сдвинута на ступень вверх. Замер показал, что до 1000 очков
+  // поле держало 9-10 свободных ячеек само собой («в тесноте» 2-3 % ходов), то есть
+  // первая половина партии проходилась на автомате. Порог — единственный рычаг,
+  // который бьёт по НАЧАЛУ: цвета обваливают медиану вчетверо, а плотность старта и
+  // ступени стопок на тесноту не влияют вовсе (лишние стопки просто быстрее сгорают).
   merge:     { thresholdSteps: [
-                 { fromScore: 0,    threshold: 10 },
-                 { fromScore: 1500, threshold: 11 },
-                 { fromScore: 3000, threshold: 12 }
+                 { fromScore: 0,    threshold: 11 },
+                 { fromScore: 1500, threshold: 12 },
+                 { fromScore: 3000, threshold: 13 }
                ],
                maxWaveIterations: 100 },
   // Набор цветов расширяется вместе с полем (см. board.radiusSteps): 4 -> 7 -> 10.
@@ -136,6 +145,22 @@ const CONFIG = {
   // платит вдвое меньше: около 180 монет за партию, шесть покупок.
   scoring:   { burnBaseTiles: 10, pointsPerTileBase: 1, pointsPerTileOver: 2,
                coinsPerBurnedTile: 1, coinsFreeTiles: 12, comboCoinBonus: 5 },
+  // Возрождение после поражения (Phase 37). Убирает половину стопок — начиная с
+  // самых высоких, они мешают больше всего; случайный выбор давал бы «повезло /
+  // не повезло» на ровном месте. Счёт, кольца и рекорд сохраняются.
+  //
+  // Каждое следующее возрождение в партии дороже предыдущего: иначе накопленный
+  // кошелёк делал бы партию бесконечной. Дальше последней ступени цена не растёт.
+  revive:    { costs: [200, 500, 1000], clearShare: 0.5 },
+  // Лига (Phase 37). Дивизион считается от личного рекорда и работает офлайн; где
+  // у площадки есть лидерборд (Яндекс, CrazyGames), плашка показывает ещё и место.
+  // Своего бэкенда нет и не будет — ADR-0001.
+  league:    { tiers: [
+                 { fromBest: 0,    key: 'leagueBronze'   },
+                 { fromBest: 1000, key: 'leagueSilver'   },
+                 { fromBest: 2500, key: 'leagueGold'     },
+                 { fromBest: 5000, key: 'leaguePlatinum' }
+               ] },
   // Драма-менеджер выдачи (Phase 25, ADR-0008). Пришёл на смену «милосердию»,
   // которое подыгрывало в начале партии: замер показал, что на выживаемость оно
   // не влияет вовсе, а ощущение «игра поддакивает новичку» давало.
@@ -148,37 +173,56 @@ const CONFIG = {
   //
   // Обратная сторона — давление: после pressureFromScore очков первая стопка
   // раздачи иногда нарочно не подходит ни к одной стопке поля.
+  // Phase 36: выручка ужата, давление начинается втрое раньше. Совсем убирать
+  // выручку нельзя — замер показал, что на начало она не влияет вовсе (там теснит
+  // порог сгорания), зато середину делает жёстче, а новичка теряют на первых партиях.
   drama:     { rescueFreeCells: 3,      // столько свободных ячеек и меньше — беда
-               maxRescuesPerGame: 3,
-               rescueUntilScore: 1500,  // дальше игрок выплывает сам
+               maxRescuesPerGame: 2,
+               rescueUntilScore: 800,   // дальше игрок выплывает сам
                rescueSlots: 2,          // сколько стопок раздачи подчиняется выручке:
                                         // одной мало — замер показал, что на исход
                                         // партии она почти не влияет (ADR-0008)
-               pressureFromScore: 700,
-               pressureChance: 0.35,
+               pressureFromScore: 250,
+               pressureChance: 0.5,
                pressureSlots: 1 },      // давить всей рукой нельзя: рука перестанет
                                         // быть выбором и станет наказанием
   // Анимации. Всё, что ниже пустой строки, — juice (Phase 15): обнуление любого
   // числа гасит соответствующий эффект, логика игры от них не зависит.
-  animation: { waveStepMs: 340, burnFlashMs: 280, landingMs: 150,
+  animation: { burnFlashMs: 280, landingMs: 150,
                landingScale: 1.22, burnFlashGrow: 0.45, ringGrowMs: 420,
-               snapMs: 200,          // доворот поля до грани — должен быть отзывчивым
-               // Слияние стопок: фишки летят дугой, по одной, с задержкой
-               flowStagger: 0.07,    // сдвиг старта соседних фишек, доли шага
+               // отдельной длительности у доворота больше нет (Phase 34): угол
+               // всегда догоняет camera.target, и доворот — это просто новая цель
+               // Слияние стопок: фишки летят дугой по очереди, а не комом.
+               // Задержка задана в миллисекундах, а не в долях шага (Phase 34):
+               // в долях она сжималась числом фишек, и блок из пяти улетал за 24 мс
+               // на фишку — глазом это и была «куча».
+               flowTravelMs: 260,    // полёт одной фишки
+               flowStepMs: 70,       // задержка между соседними фишками
+               // потолок обязателен: в тестах часы прыгают на 1000 мс за кадр, и
+               // анимация длиннее секунды рискует не завершиться
+               flowMaxMs: 900,
                flowArc: 34,          // высота дуги, px
                flowLift: 0.14,       // приближение фишки на вершине дуги
                flowFlutter: 0.16,    // покачивание бумаги в полёте, радианы
                flowShadow: 0.35,     // плотность тени под летящей фишкой
                // Бусты: стопка летит целиком, «убрать» рассыпает её на осколки,
                // «пересдача» меняет руку — старые стопки уезжают, новые падают
+               dragFollowMs: 55,     // за сколько стопка догоняет палец
                boostMoveMs: 320, boostArc: 46, boostScatterPerTile: 3,
                handSwapMs: 300, handSwapRise: 60,
 
-               particlesPerBurn: 14, particleMs: 620, particleSpeed: 190,
+               // Сила сгорания (Phase 35): осколки, кольцо, тряска и вспышка
+               // берут её одним числом, иначе картинка разъезжается.
+               burnPowerMax: 3,      // потолок силы: 30 фишек при пороге 10
+               particlesPerBurn: 14, particlesMax: 60,
+               particleMs: 620, particleSpeed: 190,
                particleGravity: 520, particleSize: 5,
+               ringMs: 420,          // ударная волна от сгоревшего блока
+               ringGrow: 1.9,        // во сколько раз кольцо расходится
+               ringWidth: 7,
                floatMs: 820, floatRise: 86,     // всплывающее «+N очков»
                counterMs: 420,                  // счёт и кошелёк догоняют значение
-               shakeMs: 260, shakeAmp: 9, shakeFromTiles: 15,
+               shakeMs: 260, shakeAmp: 9, shakeAmpMax: 22, shakeFromTiles: 15,
                overlayFadeMs: 260,
                pressMs: 140,        // отклик нажатия: кнопка вдавливается и отходит
                pressScale: 0.94 },
@@ -393,6 +437,14 @@ const CONFIG = {
                minSpinRadius: 70,     // ближе к центру палец поле не крутит:
                                       // там на пиксель приходятся десятки градусов
                spinSensitivity: 0.85, // отклик чуть мягче, чем 1:1
+               // Сглаживание жеста (Phase 34). Палец задаёт camera.target, а
+               // видимый угол догоняет его каждый кадр: раньше угол писался
+               // напрямую и между событиями указателя картинка стояла — поворот
+               // читался ступеньками.
+               followMs: 70,          // за сколько угол догоняет палец
+               spinFriction: 0.004,   // затухание инерции: доля скорости за 1 мс
+               spinStopSpeed: 0.0006, // рад/мс, ниже которых пора доворачивать
+               spinMaxSpeed: 0.012,   // потолок скорости: рывок не должен унести поле
                resetButton: { size: 44, margin: 18 } },
   // Бусты за монеты. Сгорание десятки даёт 10 монет — буст стоит 2-4 сгорания.
   // Три буста решают три разные задачи: где лежит стопка, что лежит в руке,
@@ -404,10 +456,22 @@ const CONFIG = {
                { kind: 'reroll', cost: 40, label: 'boostReroll', instant: true, hint: '' },
                { kind: 'remove', cost: 60, label: 'boostRemove', hint: 'hintRemove' }
              ],
-  // Вибрация (Phase 18). Порог крупного сгорания общий с тряской экрана
-  // (animation.shakeFromTiles): отдача должна совпадать с картинкой.
-  // Массив — это чередование «вибрируем / пауза», миллисекунды.
-  haptics:   { enabled: true, burn: 18, combo: [12, 40, 24], over: 60 },
+  // Вибрация (Phase 18, набор событий пересмотрен в Phase 35). Порог крупного
+  // сгорания общий с тряской экрана (animation.shakeFromTiles): отдача должна
+  // совпадать с картинкой. Массив — это чередование «вибрируем / пауза», мс.
+  //
+  // До Phase 35 отдача была только на блоке от 15 фишек, и при пороге сгорания
+  // 10–12 телефон в обычной партии молчал. Теперь отвечает каждое сгорание,
+  // а крупное — заметно сильнее. На iOS гаптики нет вовсе: Safari не знает
+  // navigator.vibrate, и обойти это из веба нечем.
+  haptics:   { enabled: true,
+               burnSmall: 10,                    // любое сгорание
+               burnBig: 26,                      // от shakeFromTiles фишек
+               combo: [12, 40, 24],              // цепочка от двух звеньев
+               comboLong: [12, 36, 18, 36, 26],  // от четырёх: длиннее и ощущается
+               comboLongFrom: 4,
+               over: 60,                         // конец партии
+               deny: 8 },                        // отказ действия
   // Платформа: SDK подгружается лениво и только на домене Яндекс Игр (ADR-0005).
   // Локально и на обычном хостинге сеть не используется вообще.
   platform:  { yandexHosts: ['yandex.net', 'yandex.ru', 'games.s3.yandex.net'],
@@ -439,32 +503,53 @@ const CONFIG = {
     // зависит вся горизонтальная разметка, — а высота берётся из пропорций окна
     // и зажимается в коридор. Все вертикальные числа ниже заданы для baseHeight;
     // прирост высоты layoutUi() отдаёт полю и опускает руку с бустами к низу.
-    layout: { baseHeight: 900, minHeight: 900, maxHeight: 1560 },
-    // вертикальный коридор, в который вписывается поле любого радиуса
-    boardArea: { top: 90, bottom: 610, sideMargin: 20 },
+    // Отступы низа заданы для baseHeight и на высоком экране умножаются на
+    // uiScaleFor(height). Подобраны так, что при высоте 900 раскладка совпадает
+    // с числами ниже (hintY, handY, boostBar.y, boardArea.bottom) — десктоп от
+    // масштабирования не должен поехать.
+    layout: { baseHeight: 900, minHeight: 900, maxHeight: 1560, maxUiScale: 1.45,
+              padBottom: 8,        // от нижнего края канваса до строки цены
+              priceRow: 22,        // строка цены под кнопкой буста
+              gapHandBoost: 2,     // от руки до кнопок бустов
+              gapHintHand: 83,     // от подсказки до руки
+              gapBoardHint: 45 },  // от поля до подсказки
+    // вертикальный коридор, в который вписывается поле любого радиуса.
+    // bottomPad — зазор снизу: без него поле ложилось ровно на границу clip,
+    // и у нижнего ряда срезало обводку с тенью («невидимая стена» на playtest)
+    boardArea: { top: 90, bottom: 610, sideMargin: 20, bottomPad: 12 },
     scoreY: 62,
-    bestY: 40,
-    bestX: 652,              // правый край строки рекорда: левее шестерёнки настроек
-    trophySize: 20,          // кубок слева от строки рекорда (Phase 22)
-    trophyGap: 14,
-    coinsY: 40,              // кошелёк слева, симметрично рекорду справа
-    coinsX: 24,
+    scoreIconSize: 34,       // звезда слева от счёта (Phase 31)
+    scoreIconGap: 11,
+    scoreCharWidth: 29,      // запасная ширина цифры: measureText есть не везде
+    // Верх экрана (Phase 37): слева рекорд и под ним монеты, по центру счёт,
+    // справа плашка лиги. Шестерёнка уехала вниз, в ряд с бустами.
+    bestY: 34,
+    bestX: 20,               // левый край строки рекорда
+    trophySize: 20,
+    trophyGap: 8,
+    coinsY: 72,              // кошелёк под строкой рекорда
+    coinsX: 22,
+    league: { w: 132, h: 38, top: 16, margin: 18, radius: 10 },
     coinColor: '#F1C40F',
     coinRadius: 9,
     hintY: 655,
-    handY: 782,              // центр ряда слотов руки
+    handY: 780,              // центр ряда слотов руки
     handSlotSpacing: 175,    // расстояние между центрами слотов
     handHexSize: 42,
     // Экран настроек (Phase 19). Кнопка — в правом верхнем углу, поэтому строка
     // рекорда и заканчивается раньше (bestX). Своих цветов у экрана нет: всё
     // берётся из палитры интерфейса темы, иначе стиль пришлось бы дублировать.
-    settings: { button: { size: 44, margin: 16, top: 18 },
+    settings: { button: { size: 44, margin: 16, top: 18, iconScale: 0.62 },
                 titleY: 200,
                 rowY: [300, 385, 470, 555],   // звуки, музыка, вибрация, язык
                 labelX: 130,             // подписи слева, регуляторы справа
                 sliderX: 330, sliderW: 240, sliderH: 10, knob: 15,
                 toggleW: 84, toggleH: 40, toggleRadius: 20, toggleKnob: 15,
                 langW: 66, langH: 40, langGap: 12, langRadius: 10,
+                buttonGap: 14,           // зазор между «Перезапустить» и «Назад»
+                hotkeySize: 15,          // мелкая подсказка [R] на кнопке
+                hotkeyGap: 9,
+                hotkeyAlpha: 0.65,
                 step: 0.05 },            // округление ползунка: 5 % на деление
     // Экран статистики (Phase 20). Своих цветов нет — всё из палитры темы,
     // поэтому контракт THEMES не меняется.
@@ -481,8 +566,12 @@ const CONFIG = {
     // Кнопки бустов: значок крупно, под ним цена. Подписей нет (Phase 23) —
     // действие объясняет сам значок, а при активном бусте ещё и подсказка под
     // полем. Высота подобрана так, чтобы не наехать ни на руку, ни на нижний край.
-    boostBar: { y: 824, w: 120, h: 64, gap: 14, radius: 12,
-                iconSize: 26, iconY: 22, priceY: 47,
+    // Плашка ниже, чем была (64): цена уехала из неё наружу, под кнопку, и место
+    // под строку нужно оставить. Значок при этом крупнее — он занимает всю плашку.
+    boostBar: { y: 824, w: 120, h: 46, gap: 14, radius: 12,
+                iconScale: 0.62,     // размер значка от высоты плашки
+                priceGap: 17,        // от низа плашки до строки цены
+                priceSize: 17,
                 fill: '#2C3E50', fillActive: '#3A5068', stroke: '#34495E',
                 strokeActive: '#8FA8BF' },
     // Перетаскивание
@@ -553,10 +642,19 @@ const I18N = {
     language: 'Язык',
     on: 'вкл',
     off: 'выкл',
-    boostMove: 'Перенос',
+    restartGame: 'Перезапустить',
+    revive: 'Возрождение',
+    league: 'Лига',
+    leagueBronze: 'Бронза',
+    leagueSilver: 'Серебро',
+    leagueGold: 'Золото',
+    leaguePlatinum: 'Платина',
+    leagueRank: 'Место ',
+    statsTitle: 'За всё время',
+    boostMove: 'Перестановка',
     boostReroll: 'Пересдача',
     boostRemove: 'Убрать',
-    hintMove: 'Выбери стопку, потом свободную ячейку',
+    hintMove: 'Выбери стопку, потом куда её переставить',
     hintRemove: 'Выбери стопку, которую убрать',
     combo: 'Комбо ×',
     newThreshold: 'Теперь нужно ',
@@ -593,10 +691,19 @@ const I18N = {
     language: 'Language',
     on: 'on',
     off: 'off',
-    boostMove: 'Move',
+    restartGame: 'Restart',
+    revive: 'Revive',
+    league: 'League',
+    leagueBronze: 'Bronze',
+    leagueSilver: 'Silver',
+    leagueGold: 'Gold',
+    leaguePlatinum: 'Platinum',
+    leagueRank: 'Rank ',
+    statsTitle: 'All time',
+    boostMove: 'Swap',
     boostReroll: 'Reshuffle',
     boostRemove: 'Remove',
-    hintMove: 'Pick a stack, then an empty cell',
+    hintMove: 'Pick a stack, then where to put it',
     hintRemove: 'Pick a stack to remove',
     combo: 'Combo ×',
     newThreshold: 'Now you need ',
@@ -1561,17 +1668,21 @@ const hexMath = {
 
   // Вписать поле радиуса R в отведённый коридор: по ширине нужно size*(3R+2),
   // по высоте size*√3*(2R+1). Берём меньшее, но не больше hex.maxSize.
+  //
+  // Рабочая зона — не весь коридор: сверху вычитается maxRise (высокие стопки растут
+  // вверх от ячейки), снизу bottomPad. Поле **центрируется** в этой зоне, а не
+  // прижимается к её верху: на высоком экране остаток высоты иначе весь собирался
+  // под полем одной пустой полосой.
   fitLayout(radius) {
     const area = CONFIG.ui.boardArea;
     const availWidth = CONFIG.canvas.width - area.sideMargin * 2;
-    // над полем резервируем место под высокие стопки: они растут вверх от ячейки
-    const availHeight = (area.bottom - area.top) - CONFIG.tile.maxRise;
+    const zoneTop = area.top + CONFIG.tile.maxRise;
+    const zoneBottom = area.bottom - area.bottomPad;
     const size = Math.min(
       CONFIG.hex.maxSize,
       availWidth / (3 * radius + 2),
-      availHeight / (Math.sqrt(3) * (2 * radius + 1))
+      (zoneBottom - zoneTop) / (Math.sqrt(3) * (2 * radius + 1))
     );
-    const halfHeight = Math.sqrt(3) / 2 * size * (2 * radius + 1);
     // размер гекса сменился — спрайты прежнего размера больше не понадобятся
     if (Math.abs(size - hexMath.layout.size) > 0.01 && render.tileCache) {
       render.tileCache.clear();
@@ -1579,8 +1690,7 @@ const hexMath = {
     hexMath.layout = {
       size,
       centerX: CONFIG.canvas.width / 2,
-      // поле прижато к низу области, сверху остаётся зазор ровно под стопки
-      centerY: area.top + CONFIG.tile.maxRise + halfHeight,
+      centerY: (zoneTop + zoneBottom) / 2,
       radius
     };
     return hexMath.layout;
@@ -2271,9 +2381,13 @@ const render = {
     if (!anim) return;
     const ctx = render.ctx;
     const t = anim.t;
+    const threshold = mergeEngine.thresholdFor(state.score) || 10;
     anim.burns.forEach(b => {
       const screen = input.worldToScreen(state, b.cell.pixelX, b.cell.pixelY);
-      const size = hexMath.layout.size * (1 + CONFIG.animation.burnFlashGrow * t);
+      // крупный блок и вспыхивает шире: тот же принцип, что у осколков и тряски
+      const power = Math.min(2, b.count / threshold);
+      const size = hexMath.layout.size *
+        (1 + CONFIG.animation.burnFlashGrow * t * power);
       ctx.globalAlpha = 1 - t;
       render.hexPath(screen.x, screen.y, size);
       ctx.fillStyle = render.shade(CONFIG.colors.palette[b.color], 0.65);
@@ -2282,7 +2396,9 @@ const render = {
     });
   },
 
-  // Перелёт стопки бустом «перенос»: летит целиком, поэтому переиспользуем drawStack
+  // Перелёт стопок бустом «перестановка»: летят целиком, поэтому переиспользуем
+  // drawStack. При обмене стопок перелётов два, и вторую дугу отводим в другую
+  // сторону — иначе стопки прошли бы одна сквозь другую посреди экрана.
   drawBoostAnim(state) {
     const anim = state.boostAnim;
     if (!anim) return;
@@ -2291,12 +2407,13 @@ const render = {
     const rotation = state.camera.rotation;
     const eased = render.ease.smooth(anim.t);
     const lift = Math.sin(Math.PI * anim.t);
-    anim.moves.forEach(m => {
+    anim.moves.forEach((m, index) => {
       const from = input.worldToScreen(state, m.from.pixelX, m.from.pixelY);
       const to = input.worldToScreen(state, m.to.pixelX, m.to.pixelY);
+      const arc = index % 2 === 0 ? -a.boostArc : a.boostArc;
       render.drawStack({ tiles: m.tiles },
         from.x + (to.x - from.x) * eased,
-        from.y + (to.y - from.y) * eased - lift * a.boostArc,
+        from.y + (to.y - from.y) * eased + lift * arc,
         size, m.from.q * 31 + m.from.r * 57, rotation);
     });
   },
@@ -2349,10 +2466,33 @@ const render = {
     const a = CONFIG.animation;
     const decay = 1 - shake.age / a.shakeMs;
     const phase = shake.age / 26;
+    // амплитуду задаёт сила сгорания; старое поведение — значение по умолчанию
+    const amp = shake.amp || a.shakeAmp;
     return {
-      x: Math.sin(phase) * a.shakeAmp * decay,
-      y: Math.cos(phase * 1.4) * a.shakeAmp * decay * 0.6
+      x: Math.sin(phase) * amp * decay,
+      y: Math.cos(phase * 1.4) * amp * decay * 0.6
     };
+  },
+
+  // Ударная волна сгорания: контур гекса расходится и гаснет. Отдельно от вспышки
+  // (drawBurns) — та заливает ячейку, а это очерчивает удар и видно на крупных.
+  drawRings(state) {
+    const list = state.fx.rings;
+    if (!list.length) return;
+    const ctx = render.ctx;
+    const a = CONFIG.animation;
+    const size = hexMath.layout.size;
+    list.forEach(r => {
+      const t = r.age / a.ringMs;
+      const screen = input.worldToScreen(state, r.cell.pixelX, r.cell.pixelY);
+      const grow = 1 + (a.ringGrow - 1) * render.ease.outCubic(t) * r.power;
+      ctx.globalAlpha = (1 - t) * 0.8;
+      ctx.lineWidth = a.ringWidth * (1 - t * 0.7) * Math.min(2, r.power);
+      ctx.strokeStyle = render.shade(CONFIG.colors.palette[r.color], 0.4);
+      render.hexPath(screen.x, screen.y, size * grow);
+      ctx.stroke();
+    });
+    ctx.globalAlpha = 1;
   },
 
   // Центр слота руки — геометрия нужна и отрисовке, и вводу
@@ -2395,26 +2535,33 @@ const render = {
     const ctx = render.ctx;
     const ui = CONFIG.ui;
 
-    ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.fillStyle = ui.text;
     ctx.font = 'bold 52px system-ui, sans-serif';
     // на экране счёт догоняет настоящий, иначе он прыгает скачком
-    ctx.fillText(String(Math.round(state.scoreShown)), CONFIG.canvas.width / 2, ui.scoreY);
+    const scoreText = String(Math.round(state.scoreShown));
+    // значок и число — одна группа по центру: центрировать одно число нельзя,
+    // иначе значок сдвинул бы его вбок. Тот же приём, что у цены на кнопке буста.
+    const scoreW = render.textWidth(scoreText, ui.scoreCharWidth);
+    const groupX = (CONFIG.canvas.width - (ui.scoreIconSize + ui.scoreIconGap + scoreW)) / 2;
+    render.drawIcon('score', groupX + ui.scoreIconSize / 2, ui.scoreY,
+      ui.scoreIconSize, ui.text);
+    ctx.textAlign = 'left';
+    ctx.fillText(scoreText, groupX + ui.scoreIconSize + ui.scoreIconGap, ui.scoreY);
 
-    ctx.textAlign = 'right';
+    // Рекорд ушёл в левый верхний угол, монеты — под него (Phase 37, схема
+    // пользователя). Правый угол занят плашкой лиги.
+    ctx.textAlign = 'left';
     // рекорд, побитый в этой партии, держится акцентным цветом до её конца
     // (Phase 20): вспышка гаснет за секунду, а факт остаётся
     ctx.fillStyle = state.recordBeaten ? ui.text : ui.textDim;
     ctx.font = '20px system-ui, sans-serif';
-    // строка кончается левее шестерёнки настроек, поэтому край задан числом
     const bestText = t(state.recordBeaten ? 'newRecord' : 'record') + state.best;
-    ctx.fillText(bestText, ui.bestX, ui.bestY);
-    // кубок слева от строки: её ширина зависит от величины рекорда
-    render.trophyIcon(ui.bestX - render.textWidth(bestText, 10) - ui.trophyGap,
-      ui.bestY, ui.trophySize);
+    render.trophyIcon(ui.bestX + ui.trophySize / 2, ui.bestY, ui.trophySize);
+    ctx.fillText(bestText, ui.bestX + ui.trophySize + ui.trophyGap, ui.bestY);
 
     render.drawCoins(state);
+    render.drawLeagueBadge(state);
 
     // активный буст объясняет, что выбирать; иначе стартовая подсказка
     const boostHintKey = state.boost ? input.boostConfig(state.boost.kind).hint : null;
@@ -2444,14 +2591,18 @@ const render = {
       // фишки уже сняты с соседа (planWave), поэтому исходную высоту восстанавливаем
       const leftBehind = f.from.stack ? f.from.stack.tiles.length : 0;
       const fromTotal = leftBehind + f.count;
-      // вся стая занимает span «шагов»: соседние фишки стартуют с задержкой
-      const span = 1 + (f.count - 1) * a.flowStagger;
+      // Доли от общей длительности шага: своя фишка летит travel, соседняя
+      // трогается на step позже. Длительность посчитана в flowDuration по самой
+      // высокой стайке, поэтому у низких остаётся запас — они успевают раньше.
+      const duration = anim.duration || a.flowTravelMs;
+      const travelPart = a.flowTravelMs / duration;
+      const stepPart = a.flowStepMs / duration;
       const color = CONFIG.colors.palette[f.color];
 
       for (let i = 0; i < f.count; i++) {
         // верхняя фишка снимается первой — у неё нулевая задержка
-        const delay = (f.count - 1 - i) * a.flowStagger;
-        const local = Math.max(0, Math.min(1, anim.t * span - delay));
+        const delay = (f.count - 1 - i) * stepPart;
+        const local = Math.max(0, Math.min(1, (anim.t - delay) / travelPart));
         const eased = render.ease.smooth(local);
         const lift = Math.sin(Math.PI * local);
 
@@ -2489,7 +2640,9 @@ const render = {
   drawDrag(state) {
     const d = state.drag;
     if (!d) return;
-    const screen = input.worldToScreen(state, d.x, d.y);
+    // рисуем догоняющую позицию, а не палец: ячейку под стопкой при этом
+    // по-прежнему считает input по пальцу, поэтому точность не страдает
+    const screen = input.worldToScreen(state, d.shownX, d.shownY);
     render.drawStack(d.stack, screen.x, screen.y, hexMath.layout.size, 0,
       state.camera.rotation);
   },
@@ -2500,25 +2653,36 @@ const render = {
   // что и атрибут d. Системные эмодзи отвергнуты: они разные на каждой ОС и
   // глянцевые поверх матовой бумаги.
   //
-  // Все пути нарисованы в квадрате 24×24 — как принято в любом наборе иконок.
-  // Метафоры выбраны узнаваемые: подписи с кнопок бустов убраны, и значок
+  // Все пути нарисованы в квадрате 24×24 с отступом 2 — как принято в любом наборе
+  // иконок. Метафоры выбраны узнаваемые: подписи с кнопок бустов убраны, и значок
   // должен объяснять действие сам.
+  //
+  // Набор пересобран в Phase 31 по выбору пользователя из dev-песочницы
+  // icons-preview.html (там же лежат генераторы гекса и шестерёнки: считать их
+  // вершины руками — гарантированная ошибка, а в игру уезжает готовая строка).
   iconPaths: {
-    coin: { fill: 'M12 3a9 9 0 1 1 0 18 9 9 0 0 1 0-18z',
-            stroke: 'M12 7.6a4.4 4.4 0 1 0 0 8.8 4.4 4.4 0 0 0 0-8.8z',
-            lineWidth: 1.4 },
-    trophy: { fill: 'M7 4h10v4.5a5 5 0 0 1-10 0zM11 13.5h2V17h-2zM8 18h8v2.2H8z',
-              stroke: 'M7 5.4H4.6v1.8a3.2 3.2 0 0 0 2.8 3.2M17 5.4h2.4v1.8a3.2 3.2 0 0 1-2.8 3.2',
-              lineWidth: 1.6 },
-    // перенос: гекс уезжает вправо
-    move: { fill: 'M9.6 12l-1.8 3.1H4.2L2.4 12l1.8-3.1h3.6z',
-            stroke: 'M12.4 12h7.2M16.8 8.8L20 12l-3.2 3.2',
-            lineWidth: 2 },
+    // монета: гекс-жетон с гекс-чеканкой — валюта игры про соты
+    coin: { fill: 'M21.4 12L16.7 20.14L7.3 20.14L2.6 12L7.3 3.86L16.7 3.86Z',
+            stroke: 'M16.6 12L14.3 15.98L9.7 15.98L7.4 12L9.7 8.02L14.3 8.02Z',
+            lineWidth: 1.5 },
+    // рекорд: кубок, чаша срезана гексом
+    trophy: { fill: 'M6.4 3.8h11.2v3.4L14.8 12H9.2L6.4 7.2zM10.9 12.6h2.2V17h-2.2zM7.6 17.6h8.8v2.6H7.6z',
+              stroke: 'M6.4 5.2H3.8v2a3.4 3.4 0 0 0 3 3.4M17.6 5.2h2.6v2a3.4 3.4 0 0 1-3 3.4',
+              lineWidth: 1.7 },
+    // текущий счёт: звезда — знак очков, понятный без пояснений
+    score: { fill: 'M12 2.8l2.9 5.9 6.5.9-4.7 4.6 1.1 6.5-5.8-3.1-5.8 3.1 1.1-6.5L2.6 9.6l6.5-.9z' },
+    // настройки: шестерёнка, но зубцов шесть — рифма с гекс-сеткой поля.
+    // Дырка — второй контур в обратную сторону: заливка nonzero вычитает его сама,
+    // поэтому отверстие не стоит второй операции fill.
+    gear: { fill: 'M21.96 10.32L21.96 13.68L18.94 14.58L17.7 16.72L18.44 19.78L15.52 21.47L13.23 19.3L10.77 19.3L8.48 21.47L5.56 19.78L6.3 16.72L5.06 14.58L2.04 13.68L2.04 10.32L5.06 9.42L6.3 7.28L5.56 4.22L8.48 2.53L10.77 4.7L13.23 4.7L15.52 2.53L18.44 4.22L17.7 7.28L18.94 9.42ZM8.6 12a3.4 3.4 0 1 0 6.8 0a3.4 3.4 0 1 0 -6.8 0Z' },
+    // перестановка: две стрелки навстречу — общепринятый знак обмена
+    move: { stroke: 'M4 9h14.4M15 5.6L18.4 9 15 12.4M20 15H5.6M9 11.6L5.6 15 9 18.4',
+            lineWidth: 2.2 },
     // пересдача: круговая стрелка — общепринятый «обновить»
     reroll: { stroke: 'M19.5 12a7.5 7.5 0 1 1-2.2-5.3M19.8 4.4v3.6h-3.6',
               lineWidth: 2.2 },
-    // убрать: корзина
-    remove: { stroke: 'M4.6 6.8h14.8M9.8 6.8V4.6h4.4v2.2M6.4 6.8l1 12.6h9.2l1-12.6M10.2 10.4v6M13.8 10.4v6',
+    // убрать: молоток. Корзина говорила «удалить файл», а стопку игрок ломает
+    remove: { fill: 'M4.6 4.2h14.8a1.6 1.6 0 0 1 1.6 1.6v3.4a1.6 1.6 0 0 1-1.6 1.6H4.6a1.6 1.6 0 0 1-1.6-1.6V5.8a1.6 1.6 0 0 1 1.6-1.6zM10.7 10.8h2.6v10.4h-2.6z',
               lineWidth: 2 }
   },
 
@@ -2604,6 +2768,28 @@ const render = {
     ctx.fillText(String(Math.round(state.coinsShown)), cx + ui.coinRadius + 8, ui.coinsY);
   },
 
+  // Плашка лиги в правом верхнем углу (Phase 37). Показывает место в таблице
+  // площадки, если та его даёт, иначе дивизион по личному рекорду — так вёрстка
+  // не прыгает между площадками (у GameDistribution лидерборда нет вовсе).
+  leagueBadgeRect() {
+    const c = CONFIG.ui.league;
+    return { x: CONFIG.canvas.width - c.w - c.margin, y: c.top, w: c.w, h: c.h };
+  },
+
+  drawLeagueBadge(state) {
+    const ctx = render.ctx;
+    const ui = CONFIG.ui;
+    const b = render.leagueBadgeRect();
+    render.withPress(state, 'league', b, () => {
+      render.paperCard(b.x, b.y, b.w, b.h, ui.league.radius, ui.cardFill);
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillStyle = ui.text;
+      ctx.font = 'bold 18px system-ui, sans-serif';
+      ctx.fillText(leagueLabel(state), b.x + b.w / 2, b.y + b.h / 2 + 1);
+    });
+  },
+
   // Прямоугольник кнопки «Заново» — геометрия нужна и отрисовке, и вводу
   restartButtonRect() {
     const ui = CONFIG.ui;
@@ -2615,17 +2801,40 @@ const render = {
     };
   },
 
+  // Нижний ряд экрана настроек (Phase 32): «Перезапустить» и «Назад». Кнопки
+  // полноразмерные, а не половинки, как «Рейтинг» со «Статистикой»: там ряд жмёт
+  // третья строка оверлея, а здесь 240×2 плюс зазор свободно влезают в 720.
+  // Высоту и низ берём у restartButtonRect — она уже ездит вместе с канвасом.
+  settingsRestartRect() {
+    const ui = CONFIG.ui;
+    const row = render.restartButtonRect();
+    const total = ui.buttonW * 2 + ui.settings.buttonGap;
+    return { x: (CONFIG.canvas.width - total) / 2, y: row.y, w: ui.buttonW, h: row.h };
+  },
+  settingsBackRect() {
+    const left = render.settingsRestartRect();
+    return { x: left.x + left.w + CONFIG.ui.settings.buttonGap, y: left.y,
+             w: left.w, h: left.h };
+  },
+
   // Кнопка «Рейтинг» на оверлее конца — над кнопкой «Заново»
   // Ряд над кнопкой «Заново» делят «Рейтинг» и «Статистика» (Phase 20):
   // третьей строки оверлей не выдерживает — она наезжает на строку кошелька.
-  leaderboardButtonRect() {
+  // Нижний ряд оверлея конца делят «Возрождение» и «Заново» (Phase 37), а
+  // «Рейтинг» стоит над ними во всю ширину. Кнопки статистики больше нет: её
+  // счётчики переехали на экран лиги, и оверлей не выдерживает четвёртой строки.
+  reviveButtonRect() {
     const btn = render.restartButtonRect();
     const half = (btn.w - 10) / 2;
-    return { x: btn.x, y: btn.y - btn.h - 8, w: half, h: btn.h - 12 };
+    return { x: btn.x, y: btn.y, w: half, h: btn.h };
   },
-  statsButtonRect() {
-    const rating = render.leaderboardButtonRect();
-    return { x: rating.x + rating.w + 10, y: rating.y, w: rating.w, h: rating.h };
+  restartHalfRect() {
+    const left = render.reviveButtonRect();
+    return { x: left.x + left.w + 10, y: left.y, w: left.w, h: left.h };
+  },
+  leaderboardButtonRect() {
+    const btn = render.restartButtonRect();
+    return { x: btn.x, y: btn.y - btn.h - 2, w: btn.w, h: btn.h - 12 };
   },
 
   // Экран рейтинга поверх оверлея конца партии
@@ -2681,6 +2890,25 @@ const render = {
           190 + board.entries.length * 36 + 28);
       }
     }
+
+    // Личные счётчики за всё время (Phase 20) переехали сюда из отдельного экрана
+    // статистики (Phase 37): оверлей конца не выдерживал четвёртой кнопки, а
+    // данные родственные — обе таблицы про «как я играю».
+    const stats = board.stats || emptyStats();
+    const cfg = ui.stats;
+    ctx.textAlign = 'center';
+    ctx.fillStyle = ui.overlayText;
+    ctx.font = 'bold 22px system-ui, sans-serif';
+    ctx.fillText(t('statsTitle'), W / 2, cfg.countersY - cfg.counterStep);
+    ctx.fillStyle = ui.textDim;
+    ctx.font = '19px system-ui, sans-serif';
+    [[t('statsGames'), stats.games],
+     [t('statsBurns'), stats.burns],
+     [t('statsBiggest'), stats.biggestBlock],
+     [t('statsCombo'), stats.longestCombo],
+     [t('statsCoins'), stats.coins]].forEach((row, i) => {
+      ctx.fillText(row[0] + row[1], W / 2, cfg.countersY + i * cfg.counterStep);
+    });
 
     const back = render.restartButtonRect();
     render.paperCard(back.x, back.y, back.w, back.h, ui.buttonRadius, ui.buttonFill);
@@ -2768,13 +2996,37 @@ const render = {
       ctx.fillText(label, rect.x + rect.w / 2, rect.y + rect.h / 2 + 1);
     });
     outlineButton(render.leaderboardButtonRect(), t('leaderboard'));
-    outlineButton(render.statsButtonRect(), t('stats'));
 
-    const btn = render.restartButtonRect();
+    // «Возрождение»: цена растёт с каждым разом за партию, поэтому она написана
+    // прямо на кнопке. Не хватило монет — кнопка приглушена, как у бустов.
+    const reviveBtn = render.reviveButtonRect();
+    const cost = reviveCost(state);
+    const affordable = state.coins >= cost;
+    render.withPress(state, 'revive', reviveBtn, () => {
+      ctx.globalAlpha = state.overlayT * (affordable ? 1 : 0.45);
+      render.paperCard(reviveBtn.x, reviveBtn.y, reviveBtn.w, reviveBtn.h,
+        ui.buttonRadius, ui.buttonFillDark);
+      ctx.fillStyle = ui.buttonText;
+      ctx.font = 'bold 20px system-ui, sans-serif';
+      ctx.fillText(t('revive'), reviveBtn.x + reviveBtn.w / 2,
+        reviveBtn.y + reviveBtn.h / 2 - 9);
+      // цена с монеткой: группа по центру кнопки, приём тот же, что у счёта в HUD
+      ctx.font = '17px system-ui, sans-serif';
+      const costText = String(cost);
+      const costW = render.textWidth(costText, 9);
+      const groupX = reviveBtn.x + (reviveBtn.w - (costW + 20)) / 2;
+      render.coinIcon(groupX + 7, reviveBtn.y + reviveBtn.h / 2 + 14, 7);
+      ctx.textAlign = 'left';
+      ctx.fillText(costText, groupX + 20, reviveBtn.y + reviveBtn.h / 2 + 14);
+      ctx.textAlign = 'center';
+      ctx.globalAlpha = state.overlayT;
+    });
+
+    const btn = render.restartHalfRect();
     render.withPress(state, 'restart', btn, () => {
       render.paperCard(btn.x, btn.y, btn.w, btn.h, ui.buttonRadius, ui.buttonFill);
       ctx.fillStyle = ui.buttonText;
-      ctx.font = 'bold 26px system-ui, sans-serif';
+      ctx.font = 'bold 22px system-ui, sans-serif';
       ctx.fillText(t('restart'), btn.x + btn.w / 2, btn.y + btn.h / 2 + 1);
     });
     ctx.globalAlpha = 1;
@@ -2837,19 +3089,18 @@ const render = {
         active ? bar.fillActive : bar.fill, active ? bar.strokeActive : null);
 
       ctx.globalAlpha = affordable ? 1 : 0.4;
-      // значок крупно по центру: три буста различаются с одного взгляда
-      render.boostIcon(boost.kind, rect.x + rect.w / 2, rect.y + bar.iconY, bar.iconSize);
+      // значок занимает всю плашку: три буста различаются с одного взгляда
+      render.boostIcon(boost.kind, rect.x + rect.w / 2, rect.y + rect.h / 2,
+        rect.h * bar.iconScale);
 
-      // цена с монеткой под значком, вся группа по центру кнопки
-      ctx.textAlign = 'left';
+      // цена — под кнопкой, а не внутри неё (Phase 33): внутри она отнимала у
+      // значка половину плашки. Одно число без монетки — решение пользователя.
+      ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
-      ctx.font = '17px system-ui, sans-serif';
-      const priceText = String(boost.cost);
-      const priceW = render.textWidth(priceText, 9);
-      const groupX = rect.x + rect.w / 2 - (priceW + 20) / 2;
-      render.coinIcon(groupX + 7, rect.y + bar.priceY, 7);
+      ctx.font = Math.round(bar.priceSize) + 'px system-ui, sans-serif';
       ctx.fillStyle = affordable ? CONFIG.ui.text : CONFIG.ui.textDim;
-      ctx.fillText(priceText, groupX + 20, rect.y + bar.priceY);
+      ctx.fillText(String(boost.cost), rect.x + rect.w / 2,
+        rect.y + rect.h + bar.priceGap);
       ctx.globalAlpha = 1;
       if (press !== 1) ctx.restore();
     });
@@ -2905,31 +3156,30 @@ const render = {
 
   // Кнопка-шестерёнка в правом верхнем углу. Строка рекорда заканчивается левее
   // (CONFIG.ui.bestX), поэтому они не наезжают друг на друга.
+  // Шестерёнка стоит в ряду бустов справа (Phase 37, схема пользователя): верх
+  // экрана заняли рекорд, счёт и лига. Высота и низ берутся у кнопок бустов,
+  // поэтому она едет вместе с ними при масштабировании низа (Phase 33).
   settingsButtonRect() {
-    const c = CONFIG.ui.settings.button;
+    const bar = CONFIG.ui.boostBar;
+    const last = render.boostButtonRect(CONFIG.boosts.length - 1);
+    const size = bar.h;
     return {
-      x: CONFIG.canvas.width - c.size - c.margin,
-      y: c.top,
-      w: c.size,
-      h: c.size
+      x: Math.min(CONFIG.canvas.width - size - CONFIG.ui.settings.button.margin,
+        last.x + last.w + bar.gap),
+      y: last.y,
+      w: size,
+      h: size
     };
   },
 
-  // Значок: гекс с вырезанной серединой — та же геометрия, что у всей игры,
-  // и рисуется двумя операциями вместо зубцов настоящей шестерёнки
+  // Значок — шестерёнка из общего набора (Phase 31). Раньше он рисовался мимо
+  // системы значков, гексом с вырезанной серединой, и был единственным местом,
+  // где стиль набора приходилось поддерживать отдельно.
   drawSettingsButton(state) {
-    const ctx = render.ctx;
     const b = render.settingsButtonRect();
-    const cx = b.x + b.w / 2;
-    const cy = b.y + b.h / 2;
     render.paperCard(b.x, b.y, b.w, b.h, 10, CONFIG.ui.cardFill);
-    render.hexPath(cx, cy, b.w * 0.30);
-    ctx.fillStyle = CONFIG.ui.text;
-    ctx.fill();
-    ctx.beginPath();
-    ctx.arc(cx, cy, b.w * 0.12, 0, Math.PI * 2);
-    ctx.fillStyle = CONFIG.ui.cardFill;
-    ctx.fill();
+    render.drawIcon('gear', b.x + b.w / 2, b.y + b.h / 2,
+      b.w * CONFIG.ui.settings.button.iconScale, CONFIG.ui.text);
   },
 
   // Дорожка ползунка: 0 — звуки, 1 — музыка
@@ -3102,13 +3352,52 @@ const render = {
     render.drawToggle();
     render.drawLangButtons();
 
-    const back = render.restartButtonRect();
-    render.paperCard(back.x, back.y, back.w, back.h, ui.buttonRadius, ui.buttonFill);
-    ctx.textAlign = 'center';
+    // нижний ряд: «Перезапустить» и «Назад» (Phase 32)
+    const restartBtn = render.settingsRestartRect();
+    render.withPress(state, 'restart', restartBtn, () => {
+      render.paperCard(restartBtn.x, restartBtn.y, restartBtn.w, restartBtn.h,
+        ui.buttonRadius, ui.buttonFill);
+      render.buttonLabelWithHotkey(t('restartGame'), 'R', restartBtn);
+    });
+
+    const back = render.settingsBackRect();
+    render.withPress(state, 'settingsBack', back, () => {
+      render.paperCard(back.x, back.y, back.w, back.h, ui.buttonRadius, ui.buttonFill);
+      ctx.textAlign = 'center';
+      ctx.fillStyle = ui.buttonText;
+      ctx.font = 'bold 24px system-ui, sans-serif';
+      ctx.fillText(t('back'), back.x + back.w / 2, back.y + back.h / 2 + 1);
+    });
+    ctx.globalAlpha = 1;
+  },
+
+  // Подпись кнопки плюс мелкая подсказка о горячей клавише справа. Обозначение
+  // клавиши в I18N не живёт: это не текст на языке, а надпись на кнопке клавиатуры.
+  // Группа центрируется целиком — иначе подсказка сдвинула бы основную подпись
+  // вбок; тот же приём, что у счёта в HUD и у цены на кнопке буста.
+  buttonLabelWithHotkey(label, key, rect) {
+    const ctx = render.ctx;
+    const ui = CONFIG.ui;
+    const cfg = ui.settings;
+    const hotkey = '[' + key + ']';
+    ctx.textAlign = 'left';
+    ctx.font = 'bold 24px system-ui, sans-serif';
+    const labelW = render.textWidth(label, 13);
+    ctx.font = cfg.hotkeySize + 'px system-ui, sans-serif';
+    const hotkeyW = render.textWidth(hotkey, cfg.hotkeySize * 0.6);
+    const groupX = rect.x + (rect.w - (labelW + cfg.hotkeyGap + hotkeyW)) / 2;
+    const centerY = rect.y + rect.h / 2 + 1;
+
     ctx.fillStyle = ui.buttonText;
     ctx.font = 'bold 24px system-ui, sans-serif';
-    ctx.fillText(t('back'), back.x + back.w / 2, back.y + back.h / 2 + 1);
-    ctx.globalAlpha = 1;
+    ctx.fillText(label, groupX, centerY);
+
+    // подсказка тусклее подписи, но своим же цветом: палитра остаётся у темы
+    const alpha = ctx.globalAlpha;
+    ctx.globalAlpha = alpha * cfg.hotkeyAlpha;
+    ctx.font = cfg.hotkeySize + 'px system-ui, sans-serif';
+    ctx.fillText(hotkey, groupX + labelW + cfg.hotkeyGap, centerY);
+    ctx.globalAlpha = alpha;
   },
 
   // Поворот мира вокруг центра поля — общая трансформация для всех мировых слоёв
@@ -3164,70 +3453,6 @@ const render = {
 
   // Экран статистики (Phase 20): лучшие партии и счётчики за всё время.
   // Глобального рейтинга здесь нет — это отдельный экран и фича Яндекс-версии.
-  drawStats(state) {
-    const screen = state.stats;
-    if (!screen || !screen.open) return;
-    const ctx = render.ctx;
-    const ui = CONFIG.ui;
-    const cfg = ui.stats;
-    const W = CONFIG.canvas.width;
-
-    ctx.globalAlpha = screen.t === undefined ? 1 : screen.t;
-    ctx.fillStyle = ui.overlayBg;
-    ctx.fillRect(0, 0, W, CONFIG.canvas.height);
-
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.fillStyle = ui.overlayText;
-    ctx.font = 'bold 34px system-ui, sans-serif';
-    ctx.fillText(t('stats'), W / 2, cfg.titleY);
-
-    const stats = screen.data || emptyStats();
-    const runs = stats.best || [];
-
-    ctx.font = '22px system-ui, sans-serif';
-    ctx.fillStyle = ui.textDim;
-    ctx.fillText(t('statsBest'), W / 2, cfg.listY - 40);
-
-    if (!runs.length) {
-      ctx.font = '20px system-ui, sans-serif';
-      ctx.fillText(t('statsEmpty'), W / 2, cfg.listY + 20);
-    } else {
-      runs.forEach((run, i) => {
-        const y = cfg.listY + i * cfg.rowStep;
-        ctx.textAlign = 'left';
-        ctx.fillStyle = i === 0 ? ui.overlayText : ui.textDim;
-        ctx.font = (i === 0 ? 'bold ' : '') + '22px system-ui, sans-serif';
-        ctx.fillText(String(i + 1), cfg.rankX, y);
-        ctx.textAlign = 'right';
-        ctx.fillText(String(run.score), cfg.scoreX, y);
-        // монеты той партии — значком, тем же, что в кошельке
-        render.coinIcon(cfg.coinsX, y, ui.coinRadius);
-        ctx.textAlign = 'left';
-        ctx.fillStyle = i === 0 ? ui.overlayText : ui.textDim;
-        ctx.fillText(String(run.coins || 0), cfg.coinsX + ui.coinRadius + 8, y);
-      });
-    }
-
-    ctx.textAlign = 'center';
-    ctx.fillStyle = ui.textDim;
-    ctx.font = '20px system-ui, sans-serif';
-    [[t('statsGames'), stats.games],
-     [t('statsBurns'), stats.burns],
-     [t('statsBiggest'), stats.biggestBlock],
-     [t('statsCombo'), stats.longestCombo],
-     [t('statsCoins'), stats.coins]].forEach((row, i) => {
-      ctx.fillText(row[0] + row[1], W / 2, cfg.countersY + i * cfg.counterStep);
-    });
-
-    const back = render.restartButtonRect();
-    render.paperCard(back.x, back.y, back.w, back.h, ui.buttonRadius, ui.buttonFill);
-    ctx.fillStyle = ui.buttonText;
-    ctx.font = 'bold 24px system-ui, sans-serif';
-    ctx.fillText(t('back'), back.x + back.w / 2, back.y + back.h / 2 + 1);
-    ctx.globalAlpha = 1;
-  },
-
   // Полный кадр: сначала мир под трансформом камеры, затем экранный слой поверх
   drawAll(state) {
     const ctx = render.ctx;
@@ -3263,6 +3488,7 @@ const render = {
     render.drawBoostAnim(state);
     render.drawFlows(state);
     render.drawBurns(state);
+    render.drawRings(state);
     render.drawParticles(state);
     ctx.restore();
 
@@ -3281,7 +3507,6 @@ const render = {
     render.drawSettingsButton(state);
     if (state.isGameOver) render.drawGameOver(state);
     render.drawLeaderboard(state);
-    render.drawStats(state);
     render.drawSettings(state);      // настройки лежат поверх всего
     render.drawFps();                // dev-замер, включается адресом ?fps=1
   }
@@ -3420,13 +3645,25 @@ const input = {
     }
     if (input.hitRect(render.settingsToggleRect(), point.x, point.y)) {
       CONFIG.haptics.enabled = !CONFIG.haptics.enabled;
-      // включили — сразу коротко отдаём: иначе на десктопе не понять, работает ли
-      if (CONFIG.haptics.enabled) Platform.vibrate(CONFIG.haptics.burn);
+      // включили — сразу отдаём: иначе не понять, работает ли гаптика на этом
+      // устройстве вообще (на iOS её нет, и это не наша поломка)
+      if (CONFIG.haptics.enabled) Platform.vibrate(CONFIG.haptics.burnBig);
       persistSettings();
       requestRender();
       return true;
     }
-    if (input.hitRect(render.restartButtonRect(), point.x, point.y)) {
+    // «Перезапустить» закрывает экран до restart(): сам restart() обнуляет
+    // state.settings напрямую и persistSettings() не зовёт — правки, сделанные в
+    // этом же заходе, потерялись бы. Повторного события платформе не будет:
+    // Platform.gameplay не отправляет два подряд одного вида.
+    if (input.hitRect(render.settingsRestartRect(), point.x, point.y)) {
+      input.pressButton(state, 'restart');
+      closeSettings(state);
+      restart();
+      return true;
+    }
+    if (input.hitRect(render.settingsBackRect(), point.x, point.y)) {
+      input.pressButton(state, 'settingsBack');
       closeSettings(state);
       return true;
     }
@@ -3446,9 +3683,9 @@ const input = {
       state.boost = null;
       return;
     }
-    if (state.isAnimating || state.isGameOver) { Audio.deny(); return; }
+    if (state.isAnimating || state.isGameOver) { denyFeedback(); return; }
     const config = input.boostConfig(kind);
-    if (state.coins < config.cost) { Audio.deny(); return; }   // не хватило монет
+    if (state.coins < config.cost) { denyFeedback(); return; }   // не хватило монет
     // буст несовместим с перетаскиванием стопки из руки
     if (state.drag) {
       state.hand.slots[state.drag.srcSlot] = state.drag.stack;
@@ -3487,14 +3724,16 @@ const input = {
     const boost = state.boost;
     if (!boost) return false;
     if (boost.kind === 'remove') return !!cell.stack;
-    // move: сначала занятая ячейка-источник, потом свободная ячейка-цель
-    return boost.from ? !cell.stack : !!cell.stack;
+    // move: сначала занятая ячейка-источник, потом любая другая — пустая
+    // (перенос) или занятая (стопки меняются местами). Сама себе цель не годится:
+    // это ход в никуда за 30 монет.
+    return boost.from ? cell !== boost.from : !!cell.stack;
   },
 
   // Клик по ячейке в режиме буста
   applyBoostTo(state, cell) {
     const boost = state.boost;
-    if (!input.isBoostTarget(state, cell)) { Audio.deny(); return; }
+    if (!input.isBoostTarget(state, cell)) { denyFeedback(); return; }
     const config = input.boostConfig(boost.kind);
 
     // Доска меняется сразу, а анимация показывает переход — тот же приём, что и
@@ -3508,18 +3747,27 @@ const input = {
       input.finishBoost(state, config.cost, [cell]);
       return;
     }
-    if (!boost.from) {                 // «перенос»: сначала ячейка-источник
+    if (!boost.from) {                 // «перестановка»: сначала ячейка-источник
       boost.from = cell;
       requestRender();
       return;
     }
+    // Цель пустая — стопка переезжает; занятая — стопки меняются местами. Перелётов
+    // тогда два, но описание полёта их принимает массивом, а волна стартует от обеих
+    // ячеек: finishBoost сам отберёт те, где стопка осталась.
     const source = boost.from;
-    cell.stack = source.stack;
-    cell.stack.cell = { q: cell.q, r: cell.r };
-    source.stack = null;
+    const moved = source.stack;
+    const swapped = cell.stack;
+    cell.stack = moved;
+    moved.cell = { q: cell.q, r: cell.r };
+    source.stack = swapped;
+    const moves = [{ tiles: moved.tiles, from: source, to: cell }];
+    if (swapped) {
+      swapped.cell = { q: source.q, r: source.r };
+      moves.push({ tiles: swapped.tiles, from: cell, to: source });
+    }
     Audio.boost(boost.kind);
-    input.finishBoost(state, config.cost, [cell],
-      input.boostFlight([{ tiles: cell.stack.tiles, from: source, to: cell }]));
+    input.finishBoost(state, config.cost, [cell, source], input.boostFlight(moves));
   },
 
   // Описание перелёта стопок для рендера: ячейки-цели прячутся, пока идёт полёт
@@ -3571,14 +3819,6 @@ const input = {
         return;
       }
 
-      // экран статистики — по тем же правилам, что и рейтинг: только «Назад»
-      if (state.stats && state.stats.open) {
-        if (input.hitRect(render.restartButtonRect(), point.x, point.y)) {
-          closeStats(state);
-        }
-        return;
-      }
-
       // экран рейтинга поверх всего: реагирует только кнопка «Назад»
       if (state.leaderboard && state.leaderboard.open) {
         if (input.hitRect(render.restartButtonRect(), point.x, point.y)) {
@@ -3594,18 +3834,24 @@ const input = {
         openSettings(state);
         return;
       }
+      // плашка лиги открывает таблицу и счётчики — и в партии, и на оверлее конца
+      if (input.hitRect(render.leagueBadgeRect(), point.x, point.y)) {
+        input.pressButton(state, 'league');
+        openLeaderboard(state);
+        return;
+      }
       if (state.isGameOver) {
         if (input.hitRect(render.leaderboardButtonRect(), point.x, point.y)) {
           input.pressButton(state, t('leaderboard'));
           openLeaderboard(state);
           return;
         }
-        if (input.hitRect(render.statsButtonRect(), point.x, point.y)) {
-          input.pressButton(state, t('stats'));
-          openStats(state);
+        if (input.hitRect(render.reviveButtonRect(), point.x, point.y)) {
+          input.pressButton(state, 'revive');
+          revive(state);
           return;
         }
-        if (input.hitRect(render.restartButtonRect(), point.x, point.y)) {
+        if (input.hitRect(render.restartHalfRect(), point.x, point.y)) {
           input.pressButton(state, 'restart');
           restart();
         }
@@ -3638,9 +3884,12 @@ const input = {
         const stack = state.hand.slots[slot];
         const world = input.screenToWorld(state, point.x, point.y);
         state.hand.slots[slot] = null;
+        // shownX/shownY — то, что нарисовано: они догоняют палец в цикле juice.
+        // При взятии совпадают с ним, иначе стопка прилетела бы из прошлого места.
         state.drag = {
           stack, srcSlot: slot, pointerId: event.pointerId,
-          x: world.x, y: world.y - CONFIG.ui.dragLift
+          x: world.x, y: world.y - CONFIG.ui.dragLift,
+          shownX: world.x, shownY: world.y - CONFIG.ui.dragLift
         };
         state.hoverKey = null;
         Audio.pick();
@@ -3684,7 +3933,8 @@ const input = {
         d.y = world.y - CONFIG.ui.dragLift;
         const cell = input.freeCellAt(state, d.x, d.y);
         state.hoverKey = cell ? hexMath.key(cell.q, cell.r) : null;
-        requestRender();
+        // картинка стопки догоняет палец в цикле juice — он же и рисует кадр
+        startFx(state);
         return;
       }
 
@@ -3702,19 +3952,36 @@ const input = {
         if (!spin.moved) {
           spin.moved = true;
           spin.startAngle = angle;
+          // отсчёт от того, что нарисовано: инерция прошлого жеста могла ещё
+          // доезжать, и цель успела уйти вперёд
+          state.camera.target = state.camera.rotation;
+          state.camera.velocity = 0;
           spin.startRotation = state.camera.rotation;
+          spin.lastAt = performance.now();
           return;
         }
         // У центра поля жест не работает, но отсчёт всё равно сдвигаем:
         // тогда при выходе из мёртвой зоны не будет скачка.
         if (input.radiusFromCenter(point.x, point.y) < cam.minSpinRadius) {
           spin.startAngle = angle;
-          spin.startRotation = state.camera.rotation;
+          spin.startRotation = state.camera.target;
           return;
         }
-        state.camera.rotation = spin.startRotation +
+        // Палец задаёт цель, а видимый угол догоняет её в цикле juice. Скорость
+        // копим здесь же: после отпускания она станет инерцией. Один рваный кадр
+        // не должен давать выброс, поэтому скорость сглаживается пополам.
+        const next = spin.startRotation +
           input.angleDelta(spin.startAngle, angle) * cam.spinSensitivity;
-        requestRender();
+        const now = performance.now();
+        const dt = now - (spin.lastAt || now);
+        if (dt > 0) {
+          const speed = Math.max(-cam.spinMaxSpeed,
+            Math.min(cam.spinMaxSpeed, (next - state.camera.target) / dt));
+          state.camera.velocity = state.camera.velocity * 0.5 + speed * 0.5;
+        }
+        spin.lastAt = now;
+        state.camera.target = next;
+        startFx(state);
       }
     });
 
@@ -3734,7 +4001,7 @@ const input = {
           input.placeStack(state, d.stack, cell);
         } else {
           state.hand.slots[d.srcSlot] = d.stack;   // отмена: занятая ячейка или вне поля
-          Audio.deny();
+          denyFeedback();
         }
         state.drag = null;
         state.hoverKey = null;
@@ -3746,7 +4013,7 @@ const input = {
       if (input.spin && input.spin.pointerId === event.pointerId) {
         const spun = input.spin.moved;
         input.spin = null;
-        if (spun) snapRotation(state);
+        if (spun) releaseSpin(state);
       }
     });
 
@@ -3762,12 +4029,12 @@ const input = {
       if (input.spin && input.spin.pointerId === event.pointerId) {
         const spun = input.spin.moved;
         input.spin = null;
-        if (spun) snapRotation(state);   // жеста не было — доворачивать нечего
+        if (spun) releaseSpin(state);    // жеста не было — доворачивать нечего
       }
       const d = state.drag;
       if (!d || d.pointerId !== event.pointerId) return;
       state.hand.slots[d.srcSlot] = d.stack;
-      Audio.deny();
+      denyFeedback();
       state.drag = null;
       state.hoverKey = null;
       requestRender();
@@ -3781,16 +4048,17 @@ const input = {
         closeSettings(state);
         return;
       }
-      if (event.code === 'Escape' && state.stats && state.stats.open) {
-        closeStats(state);
-        return;
-      }
       if (event.code === 'Escape' && state.boost) {
         state.boost = null;
         requestRender();
         return;
       }
-      if (event.code === 'KeyR' && !state.isAnimating) restart();
+      // R перезапускает и из открытого меню — но экран сначала надо закрыть по
+      // правилам: restart() обнуляет settings молча, без сохранения настроек
+      if (event.code === 'KeyR' && !state.isAnimating) {
+        if (state.settings && state.settings.open) closeSettings(state);
+        restart();
+      }
     });
   },
 
@@ -3840,7 +4108,12 @@ const GameState = {
   settings: null,      // экран настроек: {open, t, drag} — drag это индекс ползунка
   hoverKey: null,      // ключ подсвеченной свободной ячейки под стопкой
   radius: CONFIG.board.radiusSteps[0].radius,   // текущий радиус поля
-  camera: { rotation: 0 },                      // угол поворота поля, радианы
+  // Камера: rotation — что нарисовано, target — куда ведёт палец, velocity —
+  // инерция после отпускания (рад/мс). Раздельно они нужны ради плавности:
+  // события указателя приходят реже кадров и неровно (Phase 34).
+  camera: { rotation: 0, target: 0, velocity: 0 },
+  revivesUsed: 0,      // возрождений за партию: каждое следующее дороже (Phase 37)
+  league: null,        // { rank } из лидерборда площадки, если он там есть
   anim: null,          // анимация перелива: {flows, t} — живёт только внутри волны
   burnAnim: null,      // вспышка сгорания: {burns, t}
   landing: null,       // «приземление» поставленной стопки: {cell, t}
@@ -3849,7 +4122,7 @@ const GameState = {
   handAnim: null,      // смена руки бустом «пересдача»: {old, t}
   // Juice (Phase 15). Живёт в отдельном цикле: эффекты переживают конец волны,
   // а логика игры на них не смотрит.
-  fx: { particles: [], floats: [], shake: null, press: null },
+  fx: { particles: [], rings: [], floats: [], shake: null, press: null },
   // Статистика (Phase 20). Счётчики копятся за партию и в конце добавляются к
   // сохранённым; recordBeaten поднимается один раз — иначе вспышка мигала бы
   // на каждом ходу после рекорда.
@@ -3888,18 +4161,66 @@ function approach(shown, target, dt, ms) {
 }
 
 function fxAlive(state) {
+  const drag = state.drag;
+  // Инерция считается живой только когда палец отпущен: во время жеста скорость
+  // всё время ненулевая, и цикл не смог бы завершиться никогда. Пока палец на
+  // экране, кадры заказывает сам pointermove.
+  const spinning = !!(input.spin && input.spin.moved);
   return state.fx.particles.length > 0 || state.fx.floats.length > 0 ||
-    state.fx.shake !== null || !!state.fx.press ||
+    state.fx.rings.length > 0 || state.fx.shake !== null || !!state.fx.press ||
+    state.camera.rotation !== state.camera.target ||
+    (!spinning && state.camera.velocity !== 0) ||
+    (drag && (drag.shownX !== drag.x || drag.shownY !== drag.y)) ||
     state.scoreShown !== state.score || state.coinsShown !== state.coins ||
     state.overlayT < 1 ||
     (state.leaderboard && state.leaderboard.open && state.leaderboard.t < 1) ||
-    (state.stats && state.stats.open && state.stats.t < 1) ||
     (state.settings && state.settings.open && state.settings.t < 1);
+}
+
+// Экспоненциальный догон с защёлкиванием: без него значение приближается вечно
+// и цикл juice никогда не заканчивается. Тот же приём, что у approach() для счётчиков.
+function follow(shown, target, dt, ms, epsilon) {
+  if (shown === target) return target;
+  const next = shown + (target - shown) * Math.min(1, dt / ms);
+  return Math.abs(target - next) < epsilon ? target : next;
+}
+
+// Камера: видимый угол догоняет цель, а после отпускания цель едет по инерции.
+// Доворот к грани начинается, когда инерция угасла, — им по-прежнему занимается
+// snapRotation, здесь только решение о моменте.
+function stepCamera(state, dt) {
+  const cam = CONFIG.camera;
+  const camera = state.camera;
+  const spinning = !!(input.spin && input.spin.moved);
+
+  if (!spinning && camera.velocity !== 0) {
+    camera.target += camera.velocity * dt;
+    // затухание за dt миллисекунд: доля скорости, оставшаяся через миллисекунду,
+    // возведённая в степень dt — иначе прыжок часов в тестах остановил бы инерцию
+    // не сильнее одного кадра
+    camera.velocity *= Math.pow(cam.spinFriction, dt / 1000);
+    if (Math.abs(camera.velocity) < cam.spinStopSpeed) {
+      camera.velocity = 0;
+      camera.rotation = follow(camera.rotation, camera.target, dt, cam.followMs, 1e-4);
+      snapRotation(state);
+      return;
+    }
+  }
+  camera.rotation = follow(camera.rotation, camera.target, dt, cam.followMs, 1e-4);
 }
 
 function stepFx(state, dt) {
   const a = CONFIG.animation;
+  stepCamera(state, dt);
+  // перетаскиваемая стопка догоняет палец: логика (подсветка, установка) считается
+  // по пальцу, отстаёт только картинка
+  const drag = state.drag;
+  if (drag) {
+    drag.shownX = follow(drag.shownX, drag.x, dt, a.dragFollowMs, 0.05);
+    drag.shownY = follow(drag.shownY, drag.y, dt, a.dragFollowMs, 0.05);
+  }
   state.fx.particles = state.fx.particles.filter(p => (p.age += dt) < a.particleMs);
+  state.fx.rings = state.fx.rings.filter(r => (r.age += dt) < a.ringMs);
   state.fx.floats = state.fx.floats.filter(f => (f.age += dt) < a.floatMs);
   if (state.fx.shake && (state.fx.shake.age += dt) >= a.shakeMs) state.fx.shake = null;
   if (state.fx.press && (state.fx.press.age += dt) >= a.pressMs) state.fx.press = null;
@@ -3909,10 +4230,6 @@ function stepFx(state, dt) {
   const board = state.leaderboard;
   if (board && board.open && board.t < 1) {
     board.t = Math.min(1, board.t + dt / a.overlayFadeMs);
-  }
-  const stats = state.stats;
-  if (stats && stats.open && stats.t < 1) {
-    stats.t = Math.min(1, stats.t + dt / a.overlayFadeMs);
   }
   const settings = state.settings;
   if (settings && settings.open && settings.t < 1) {
@@ -3939,23 +4256,52 @@ function startFx(state) {
   requestAnimationFrame(tick);
 }
 
+// Отказ действия: звук и короткая вибрация. Собрано в одном месте, потому что
+// поводов отказать четыре (буст недоступен, не хватило монет, неверная цель,
+// стопку некуда положить) — по местам отдача разъехалась бы.
+function denyFeedback() {
+  Audio.deny();
+  Platform.vibrate(CONFIG.haptics.deny);
+}
+
 // Осколки и «+N очков» на месте сгоревшего блока. Позиция хранится в мировых
 // координатах: поле может повернуться, пока эффект живёт.
+// Сила события: 1 — минимальный блок в одиночной волне, дальше растёт от размера
+// блока и длины цепочки. Одним числом её берут осколки, кольцо, тряска и вспышка —
+// иначе картинка разъезжается: осколков много, а трясёт как от мелочи.
+function burnPower(state, burn, combo) {
+  const threshold = mergeEngine.thresholdFor(state.score) || 10;
+  const bySize = burn.count / threshold;             // 10 из 10 → 1, 25 из 10 → 2.5
+  const byCombo = 1 + Math.max(0, (combo || 1) - 1) * 0.35;
+  return Math.min(CONFIG.animation.burnPowerMax, bySize * byCombo);
+}
+
 function spawnBurnFx(state, burn, combo) {
   const a = CONFIG.animation;
-  // чем длиннее цепочка, тем гуще осколки — до трёх порций
-  const count = a.particlesPerBurn * Math.min(combo || 1, 3);
+  const power = burnPower(state, burn, combo);
+  // Густота осколков идёт от силы события, а не только от цепочки: до Phase 35
+  // блок из 10 и из 25 фишек рассыпался одинаково. Потолок обязателен — сотни
+  // частиц на кадр кладут телефон.
+  const count = Math.min(a.particlesMax, Math.round(a.particlesPerBurn * power));
   for (let i = 0; i < count; i++) {
     const angle = (i / count) * Math.PI * 2 + render.noise(i, burn.count);
-    const speed = a.particleSpeed * (0.45 + render.noise(i, 7) * 0.75);
+    const speed = a.particleSpeed * (0.45 + render.noise(i, 7) * 0.75) *
+      (0.85 + power * 0.15);
     state.fx.particles.push({
       cell: burn.cell, color: burn.color, age: 0,
       vx: Math.cos(angle) * speed, vy: Math.sin(angle) * speed - a.particleSpeed * 0.35
     });
   }
+  // ударная волна: расходящийся контур цвета сгоревшего блока
+  state.fx.rings.push({ cell: burn.cell, color: burn.color, age: 0, power });
   state.fx.floats.push({ cell: burn.cell, text: '+' + burn.points, age: 0 });
-  // тряска — на крупных сгораниях и на длинной цепочке
-  if (burn.count >= a.shakeFromTiles || combo >= 2) state.fx.shake = { age: 0 };
+  // Тряска — на крупных сгораниях и на длинной цепочке, амплитуда по силе.
+  // Прежняя была одна на все случаи, и крупный блок ощущался как минимальный.
+  if (burn.count >= a.shakeFromTiles || combo >= 2) {
+    const amp = Math.min(a.shakeAmpMax, a.shakeAmp * power);
+    // накладывающиеся сгорания не должны гасить друг друга: берём сильнейшее
+    if (!state.fx.shake || amp >= state.fx.shake.amp) state.fx.shake = { age: 0, amp };
+  }
 }
 
 // Стопку убрали бустом — она рассыпается осколками своих же цветов
@@ -4010,14 +4356,15 @@ function waveCommit(state, plan, ctx) {
   if (res.burns.length) {
     res.burns.forEach(burn => spawnBurnFx(state, burn, res.combo));
     Audio.burn(res.burns[0].count);
-    // вибрация — на тех же крупных сгораниях, что и тряска экрана
-    if (res.burns[0].count >= CONFIG.animation.shakeFromTiles) {
-      Platform.vibrate(CONFIG.haptics.burn);
-    }
+    // отвечает каждое сгорание, крупное — сильнее. Порог тот же, что у тряски
+    // экрана: отдача обязана совпадать с картинкой.
+    const h = CONFIG.haptics;
+    Platform.vibrate(res.burns[0].count >= CONFIG.animation.shakeFromTiles
+      ? h.burnBig : h.burnSmall);
     // со второго звена цепочки показываем комбо и бонус, который оно принесло
     if (res.combo >= 2) {
       Audio.combo(res.combo);
-      Platform.vibrate(CONFIG.haptics.combo);
+      Platform.vibrate(res.combo >= h.comboLongFrom ? h.comboLong : h.combo);
       state.fx.floats.push({
         cell: res.burns[0].cell, age: 0, accent: true,
         text: t('combo') + res.combo + (res.comboCoins ? '  +' + res.comboCoins : '')
@@ -4046,15 +4393,24 @@ function animateFlows(state, plan, done) {
   });
   plan.flows.forEach(f => { f.finalTotal = filled.get(hexMath.key(f.to.q, f.to.r)); });
 
-  // звук ложится на ту же дугу, что и картинка: шаг между щелчками — это
-  // flowStagger от длительности шага волны
+  // звук ложится на ту же дугу, что и картинка: шаг между щелчками — это задержка
+  // между вылетами соседних фишек
   const tiles = plan.flows.reduce((sum, f) => sum + f.count, 0);
-  Audio.flow(tiles, CONFIG.animation.flowStagger * CONFIG.animation.waveStepMs / 1000);
+  Audio.flow(tiles, CONFIG.animation.flowStepMs / 1000);
 
-  state.anim = { flows: plan.flows, t: 0 };
-  animate(state, CONFIG.animation.waveStepMs,
+  const duration = flowDuration(plan.flows);
+  state.anim = { flows: plan.flows, t: 0, duration };
+  animate(state, duration,
     (t) => { state.anim.t = t; },
     () => { state.anim = null; done(); });
+}
+
+// Сколько длится шаг волны: самая высокая стайка задаёт длительность, потому что
+// её фишки вылетают по очереди. Потолок — предохранитель для длинных переливов.
+function flowDuration(flows) {
+  const a = CONFIG.animation;
+  const maxCount = flows.reduce((max, f) => Math.max(max, f.count), 1);
+  return Math.min(a.flowMaxMs, a.flowTravelMs + (maxCount - 1) * a.flowStepMs);
 }
 
 // Общий цикл анимации: RAF работает только пока идёт эффект
@@ -4135,6 +4491,8 @@ function announceThreshold(state) {
 // Вернуть поле в исходную ориентацию
 function resetCamera(state) {
   state.camera.rotation = 0;
+  state.camera.target = 0;
+  state.camera.velocity = 0;
 }
 
 // --- Визуальный стиль (Phase 12/14) ----------------------------------------
@@ -4163,12 +4521,17 @@ let uiBase = null;
 function captureUiBase() {
   const ui = CONFIG.ui;
   uiBase = {
-    hintY: ui.hintY,
-    handY: ui.handY,
-    boostBarY: ui.boostBar.y,
-    boardBottom: ui.boardArea.bottom,
     settingsTitleY: ui.settings.titleY,
-    settingsRowY: ui.settings.rowY.slice()
+    settingsRowY: ui.settings.rowY.slice(),
+    // размеры низа: на высоком экране они растут вместе с высотой, поэтому
+    // базовые значения нужно помнить — иначе второй resize умножит их снова
+    handHexSize: ui.handHexSize,
+    handSlotSpacing: ui.handSlotSpacing,
+    boostW: ui.boostBar.w,
+    boostH: ui.boostBar.h,
+    boostGap: ui.boostBar.gap,
+    boostPriceGap: ui.boostBar.priceGap,
+    boostPriceSize: ui.boostBar.priceSize
   };
 }
 
@@ -4182,20 +4545,42 @@ function canvasHeightFor(winWidth, winHeight) {
 }
 
 // Разложить интерфейс по новой высоте. Верх (счёт, рекорд, кошелёк, шестерёнка)
-// не двигается, низ (подсказка, рука, бусты) опускается на весь прирост, а поле
-// его забирает целиком — оно и есть главное на экране. Экраны-оверлеи считаются
-// от центра, поэтому им хватает половины.
+// привязан к верху и не двигается. Низ раскладывается **снизу вверх**, а поле
+// забирает весь остаток — оно и есть главное на экране. Экраны-оверлеи считаются
+// от центра, поэтому им хватает половины прироста.
+//
+// Размеры низа при этом **растут вместе с высотой** (Phase 33): рука и кнопки
+// бустов заданы в логических единицах от ширины 720, и на узком высоком экране
+// кнопка буста получалась около 35 реальных пикселей — пальцем не попасть.
+// Множитель зажат потолком: без него на экране 1560 низ съел бы поле.
+function uiScaleFor(height) {
+  const L = CONFIG.ui.layout;
+  return Math.max(1, Math.min(L.maxUiScale, height / L.baseHeight));
+}
+
 function layoutUi(height) {
   if (!uiBase) captureUiBase();
   const ui = CONFIG.ui;
-  const grow = height - ui.layout.baseHeight;
+  const L = ui.layout;
+  const s = uiScaleFor(height);
   CONFIG.canvas.height = height;
-  ui.hintY = uiBase.hintY + grow;
-  ui.handY = uiBase.handY + grow;
-  ui.boostBar.y = uiBase.boostBarY + grow;
-  ui.boardArea.bottom = uiBase.boardBottom + grow;
-  ui.settings.titleY = uiBase.settingsTitleY + grow / 2;
-  ui.settings.rowY = uiBase.settingsRowY.map(y => y + grow / 2);
+
+  ui.handHexSize = uiBase.handHexSize * s;
+  ui.handSlotSpacing = uiBase.handSlotSpacing * s;
+  ui.boostBar.w = uiBase.boostW * s;
+  ui.boostBar.h = uiBase.boostH * s;
+  ui.boostBar.gap = uiBase.boostGap * s;
+  ui.boostBar.priceGap = uiBase.boostPriceGap * s;
+  ui.boostBar.priceSize = uiBase.boostPriceSize * s;
+
+  // снизу вверх: отступ у края → строка цены → кнопки → рука → подсказка → поле
+  ui.boostBar.y = height - (L.padBottom + L.priceRow) * s - ui.boostBar.h;
+  ui.handY = ui.boostBar.y - L.gapHandBoost * s - ui.handHexSize;
+  ui.hintY = ui.handY - ui.handHexSize - L.gapHintHand * s;
+  ui.boardArea.bottom = ui.hintY - L.gapBoardHint * s;
+
+  ui.settings.titleY = uiBase.settingsTitleY + (height - L.baseHeight) / 2;
+  ui.settings.rowY = uiBase.settingsRowY.map(y => y + (height - L.baseHeight) / 2);
 }
 
 // Подогнать канвас под окно. Возвращает true, если что-то изменилось.
@@ -4225,18 +4610,33 @@ function nearestSnapAngle(rotation) {
 }
 
 // Доворот поля до ближайшей грани после жеста вращения
+// Палец отпущен. Взмах остаётся жить инерцией — она докрутит поле и сама вызовет
+// доворот, когда угаснет (stepCamera). Медленное движение доворачиваем сразу:
+// ждать нечего, а лишний кадр задержки читался бы как залипание.
+function releaseSpin(state) {
+  if (Math.abs(state.camera.velocity) > CONFIG.camera.spinStopSpeed) {
+    startFx(state);
+    return;
+  }
+  state.camera.velocity = 0;
+  snapRotation(state);
+}
+
+// Доворот до ближайшей грани. Своей анимации у него больше нет (Phase 34): угол
+// и так каждый кадр догоняет camera.target в stepCamera, поэтому доворот — это
+// просто новая цель. Два цикла, тянущие один угол, спорили бы друг с другом.
 function snapRotation(state) {
-  const from = state.camera.rotation;
-  const to = nearestSnapAngle(from);
-  if (Math.abs(to - from) < 1e-6) {
+  const to = nearestSnapAngle(state.camera.target);
+  const wasOff = Math.abs(to - state.camera.rotation) > 1e-6;
+  state.camera.target = to;
+  state.camera.velocity = 0;
+  if (!wasOff) {
     state.camera.rotation = to;
     requestRender();
     return;
   }
   Audio.snap();
-  animate(state, CONFIG.animation.snapMs,
-    (t) => { state.camera.rotation = from + (to - from) * render.ease.smooth(t); },
-    () => { state.camera.rotation = to; requestRender(); });
+  startFx(state);
 }
 
 // Радиус поля, положенный текущему счёту
@@ -4377,32 +4777,85 @@ function checkGameOver(state) {
   Platform.submitScore(state.score);      // на платформе уйдёт в глобальный рейтинг
 }
 
+// --- Возрождение (Phase 37) -------------------------------------------------
+// Цена растёт с каждым возрождением за партию: при переходящем кошельке ровная
+// цена делала бы партию бесконечной. Дальше последней ступени цена не растёт.
+function reviveCost(state) {
+  const costs = CONFIG.revive.costs;
+  return costs[Math.min(state.revivesUsed, costs.length - 1)];
+}
+
+function canRevive(state) {
+  return state.isGameOver && state.coins >= reviveCost(state);
+}
+
+// Убирает половину стопок, начиная с самых высоких: они мешают больше всего, а
+// случайный выбор давал бы «повезло / не повезло» на ровном месте. Счёт, кольца,
+// кошелёк и рекорд остаются — партия продолжается, а не начинается заново.
+function revive(state) {
+  if (!canRevive(state)) { denyFeedback(); return false; }
+  spendCoins(state, reviveCost(state));
+  state.revivesUsed++;
+
+  const occupied = [];
+  state.cells.forEach(cell => { if (cell.stack) occupied.push(cell); });
+  occupied.sort((a, b) => b.stack.tiles.length - a.stack.tiles.length);
+  const clearCount = Math.ceil(occupied.length * CONFIG.revive.clearShare);
+  occupied.slice(0, clearCount).forEach(cell => {
+    const tiles = cell.stack.tiles.slice();
+    cell.stack = null;
+    spawnScatter(state, cell, tiles);     // тот же разлёт, что у буста «Убрать»
+  });
+
+  state.isGameOver = false;
+  state.overlayT = 1;
+  state.leaderboard = null;
+  generators.dealHand(state);             // рука могла остаться неполной
+  state.handAnim = { old: [null, null, null], t: 0 };
+  Audio.deal();
+  Platform.gameplay(true);                // для платформы партия продолжается
+  updateMusicTension(state);
+  startFx(state);
+  requestRender();
+  return true;
+}
+
+// Дивизион по личному рекорду: работает офлайн и на любой площадке (ADR-0001).
+function leagueTier(best) {
+  const tiers = CONFIG.league.tiers;
+  let tier = tiers[0];
+  tiers.forEach(step => { if (best >= step.fromBest) tier = step; });
+  return tier;
+}
+
+// Что написать на плашке лиги: место в таблице, если площадка его дала, иначе
+// дивизион. Так вёрстка не прыгает между площадками — у GameDistribution
+// лидерборда нет вовсе.
+function leagueLabel(state) {
+  const rank = state.league && state.league.rank;
+  return rank ? t('leagueRank') + rank : t(leagueTier(state.best).key);
+}
+
 // Экран рейтинга: данные тянутся при открытии, ошибки не ломают игру (ADR-0005)
 // Экран статистики (Phase 20). Данные читаются один раз при открытии: в партии
 // они не меняются, а хранилище дёргать на каждый кадр незачем.
-function openStats(state) {
-  state.stats = { open: true, t: 0, data: loadStats() };
-  Platform.gameplay(false);
-  startFx(state);
-  requestRender();
-  return state.stats;
-}
-
-function closeStats(state) {
-  state.stats = null;
-  Platform.gameplay(!state.isGameOver);
-  requestRender();
-}
-
 function openLeaderboard(state) {
+  // счётчики читаются из хранилища один раз при открытии: в партии они не
+  // меняются, а дёргать localStorage на каждый кадр незачем
+  const stats = loadStats();
   state.leaderboard = { open: true, loading: true, available: false, entries: [],
-                        playerRank: 0, t: 0 };
+                        playerRank: 0, stats, t: 0 };
   Platform.gameplay(false);
   startFx(state);
   Platform.fetchLeaderboard().then(result => {
     // t сохраняем: пока грузились данные, экран уже начал проявляться
     const shown = state.leaderboard ? state.leaderboard.t : 1;
-    state.leaderboard = Object.assign({ open: true, loading: false, t: shown }, result);
+    state.leaderboard = Object.assign({ open: true, loading: false, t: shown, stats },
+      result);
+    // место из таблицы уходит на плашку лиги: там оно важнее дивизиона
+    if (result.available && result.playerRank) {
+      state.league = { rank: result.playerRank };
+    }
     requestRender();
   });
 }
@@ -4463,10 +4916,10 @@ function restart() {
   GameState.isGameOver = false;
   GameState.showHint = true;
   GameState.rescuesUsed = 0;       // лимит выручки — на партию, а не на сессию
+  GameState.revivesUsed = 0;       // цена возрождения тоже считается за партию
   GameState.rescuedLastDeal = false;
   GameState.recordBeaten = false;
   GameState.runStats = { burns: 0, biggestBlock: 0, longestCombo: 0, coins: 0 };
-  GameState.stats = null;
   GameState.burnThreshold = mergeEngine.thresholdFor(0);
   GameState.drag = null;
   GameState.boost = null;
@@ -4482,7 +4935,7 @@ function restart() {
   GameState.boostAnim = null;
   GameState.handAnim = null;
   // эффекты гасим и счётчики ставим сразу: новая партия не должна доезжать до нуля
-  GameState.fx = { particles: [], floats: [], shake: null, press: null };
+  GameState.fx = { particles: [], rings: [], floats: [], shake: null, press: null };
   GameState.scoreShown = GameState.score;
   GameState.coinsShown = GameState.coins;
   GameState.overlayT = 1;
