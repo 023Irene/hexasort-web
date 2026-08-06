@@ -492,6 +492,12 @@ const CONFIG = {
   // облако площадки с лимитом 100 записей за 5 минут, и привычка должна быть
   // сразу правильной.
   storage:   { key: 'papercomb_save', version: 1, flushMs: 5000 },
+  // Площадка (Phase 40). sdkSrc — относительный путь: на серверах Яндекса он
+  // резолвится сам, а везде ещё (двойной клик, GitHub Pages) просто не грузится,
+  // и игра остаётся автономной. cloudMinMs — свой предохранитель поверх flushMs:
+  // flush() зовётся ещё и в конце партии, и при уходе со вкладки, а у облака
+  // лимит 100 записей за 5 минут.
+  platform:  { sdkSrc: '/sdk.js', cloudMinMs: 4000 },
   // Оформление и геометрия отрисовки
   ui: {
     bg: '#1E2A3A',
@@ -713,11 +719,16 @@ function t(key) {
   return dict[key] !== undefined ? dict[key] : key;
 }
 
+// Словарей два, а кодов языка у площадки десятки (ISO 639-1: tr, de, …).
+// Свёртка одна на оба источника — и на браузер, и на environment площадки.
+function normalizeLang(code) {
+  return String(code || '').toLowerCase().indexOf('ru') === 0 ? 'ru' : 'en';
+}
+
 // Язык браузера: всё, кроме русского, получает английский
 function detectLang() {
   try {
-    const lang = (navigator.language || '').toLowerCase();
-    return lang.indexOf('ru') === 0 ? 'ru' : 'en';
+    return normalizeLang(navigator.language);
   } catch (e) {
     return 'ru';
   }
@@ -834,8 +845,12 @@ const Storage = {
   pending: false,      // запись уже отложена — второй таймер заводить незачем
 
   defaults() {
+    // langChosen поднимается только переключателем языка в настройках: по
+    // settings.lang этого не понять — persistSettings пишет туда текущий язык
+    // при любом изменении громкости, а язык площадки не должен спорить с
+    // выбором игрока (Phase 40).
     return { version: CONFIG.storage.version, best: 0, coins: 0,
-             settings: null, stats: null, seen: {} };
+             settings: null, langChosen: false, stats: null, seen: {} };
   },
 
   // Целое неотрицательное или ноль: в хранилище мог оказаться мусор
@@ -861,6 +876,7 @@ const Storage = {
     if (saved.settings && typeof saved.settings === 'object') {
       Storage.data.settings = saved.settings;
     }
+    if (saved.langChosen === true) Storage.data.langChosen = true;
     if (saved.seen && typeof saved.seen === 'object') Storage.data.seen = saved.seen;
     if (Storage.num(saved.version) < CONFIG.storage.version) return false;
     Storage.data.best = Storage.num(saved.best);
@@ -891,13 +907,302 @@ const Storage = {
   },
 
   // Записать немедленно. Зовётся при уходе со вкладки: отложенная запись до
-  // закрытия могла и не успеть.
+  // закрытия могла и не успеть. С Phase 40 тот же снимок уходит в облако
+  // площадки — оно принимает его как есть, потому что всё лежит одним объектом.
   flush() {
+    Platform.saveCloud(Storage.data);
     try {
       localStorage.setItem(CONFIG.storage.key, JSON.stringify(Storage.data));
       return true;
     } catch (e) {
       return false;   // нет доступа к хранилищу — просто живём без сохранений
+    }
+  },
+
+  // Снимок из облака приезжает уже после старта партии: ждать сеть игра не
+  // должна. Поэтому не «загрузка», а слияние, и спорные места решаются в пользу
+  // игрока — иначе прогресс, набранный офлайн, пропал бы при первом же выходе в
+  // сеть, а это ровно то, от чего облако должно защищать.
+  mergeCloud(remote) {
+    if (!remote || typeof remote !== 'object') return false;
+    let changed = false;
+
+    // Настройки берём облачные только на чистом устройстве: локальные игрок
+    // видел последними, и подменять их под ним нельзя.
+    if (!Storage.data.settings && remote.settings && typeof remote.settings === 'object') {
+      Storage.data.settings = remote.settings;
+      if (remote.langChosen === true) Storage.data.langChosen = true;
+      applySettings(Storage.data.settings);
+      changed = true;
+    }
+    // Показанная подсказка остаётся показанной на любом устройстве
+    if (remote.seen && typeof remote.seen === 'object') {
+      Object.keys(remote.seen).forEach((key) => {
+        if (remote.seen[key] && !Storage.data.seen[key]) {
+          Storage.data.seen[key] = remote.seen[key];
+          changed = true;
+        }
+      });
+    }
+    // Прогресс прежней экономики обесценен так же, как локальный (ADR-0004)
+    if (Storage.num(remote.version) < CONFIG.storage.version) {
+      if (changed) Storage.flushSoon();
+      return changed;
+    }
+
+    const best = Storage.num(remote.best);
+    if (best > Storage.data.best) { Storage.data.best = best; changed = true; }
+    const coins = Storage.num(remote.coins);
+    if (coins > Storage.data.coins) { Storage.data.coins = coins; changed = true; }
+    if (Storage.mergeStats(remote.stats)) changed = true;
+
+    if (changed) Storage.flushSoon();
+    return changed;
+  },
+
+  // Счётчики сливаются по одному: они накапливаются на каждом устройстве
+  // отдельно, и общий максимум по объекту тут ничего не значит.
+  mergeStats(remote) {
+    if (!remote || typeof remote !== 'object') return false;
+    const local = Storage.data.stats || emptyStats();
+    let changed = false;
+    ['games', 'burns', 'coins', 'biggestBlock', 'longestCombo'].forEach((key) => {
+      const value = Storage.num(remote[key]);
+      if (value > Storage.num(local[key])) { local[key] = value; changed = true; }
+    });
+    // Таблица лучших забегов — объединение с обрезкой по той же длине, что и на
+    // экране статистики; одинаковые забеги с двух устройств не различить, но
+    // дубликат в топ-5 безобиднее потерянного рекорда.
+    if (Array.isArray(remote.best) && remote.best.length) {
+      const runs = (local.best || []).concat(remote.best)
+        .filter(run => run && Number.isFinite(run.score))
+        .sort((a, b) => b.score - a.score)
+        .slice(0, CONFIG.ui.stats.topRuns);
+      if (JSON.stringify(runs) !== JSON.stringify(local.best || [])) {
+        local.best = runs;
+        changed = true;
+      }
+    }
+    Storage.data.stats = local;
+    return changed;
+  }
+};
+
+// ============================================================================
+// Platform — единственная точка доступа к SDK площадки (Phase 40, ADR-0011).
+// Слово YaGames встречается только здесь, это закрыто тестом-сканером.
+//
+// Три правила, которые определяют вид этого кода:
+//
+// 1. Игра обязана работать без SDK. Двойной клик по файлу, GitHub Pages,
+//    tools/balance.js — везде /sdk.js не загрузится. Поэтому наружу торчат
+//    намерения («геймплей идёт», «сохрани снимок»), а не вызовы SDK, и каждое
+//    из них молча ничего не делает, пока площадки нет.
+// 2. Только .then(), никаких async/await. Тесты синхронные: они подсовывают
+//    thenable, который зовёт колбэк немедленно, и весь путь отрабатывает внутри
+//    проверки. С await пришлось бы заводить асинхронный блок тестов, а такой
+//    уже удаляли в Phase 38.
+// 3. Ошибки площадки не должны ломать партию: у каждого промиса есть catch,
+//    и он молчит — играть можно и без сети.
+// ============================================================================
+const Platform = {
+  ysdk: null,
+  player: null,
+  gameReady: false,      // игра догрузилась (у нас — конец init)
+  readySent: false,      // LoadingAPI.ready() уходит ровно один раз
+  playing: false,        // GameplayAPI: идёт ли сейчас размеченный геймплей
+  lastCloudMs: 0,
+  cloudPending: false,
+  lastSent: null,        // последний отправленный снимок: одинаковое не шлём дважды
+
+  hasSdk() {
+    return !!Platform.ysdk;
+  },
+
+  // Загрузка скрипта площадки. Доки дают два равноправных способа; берём
+  // динамический, потому что тег в <head> с onload требовал бы глобальной
+  // функции — игровой скрипт лежит в конце <body> и мог бы не успеть.
+  load() {
+    try {
+      if (typeof document === 'undefined' || !document.createElement) return false;
+      // Двойной клик по файлу и демо на GitHub Pages: площадки там нет заведомо, а
+      // запрос дал бы 404 в консоли — по чеклисту DoD она должна быть чистой.
+      // Список закрытый, а не открытый: не угадать хост площадки означало бы
+      // остаться на модерации без SDK, то есть получить отказ.
+      if (typeof location !== 'undefined' &&
+          (location.protocol === 'file:' ||
+           String(location.host || '').indexOf('github.io') !== -1)) return false;
+      if (Platform.sdkGlobal()) { Platform.boot(); return true; }
+      const script = document.createElement('script');
+      script.src = CONFIG.platform.sdkSrc;
+      script.async = true;
+      script.onload = Platform.boot;
+      script.onerror = () => {};      // нет площадки — нет и ошибки, это норма
+      document.body.appendChild(script);
+      return true;
+    } catch (e) {
+      return false;
+    }
+  },
+
+  // SDK кладёт себя в глобальную область, то есть в window: так его не нужно
+  // передавать отдельным аргументом в тестовую обёртку.
+  sdkGlobal() {
+    return (typeof window !== 'undefined' && window.YaGames) ? window.YaGames : null;
+  },
+
+  boot() {
+    const api = Platform.sdkGlobal();
+    if (!api || !api.init) return false;
+    try {
+      api.init().then(Platform.attach, () => {});
+    } catch (e) {
+      return false;
+    }
+    return true;
+  },
+
+  // Площадка приехала. Порядок вызовов важен: сначала язык и готовность
+  // (их ждёт модерация), потом игрок с его облаком.
+  attach(ysdk) {
+    if (!ysdk) return false;
+    Platform.ysdk = ysdk;
+    Platform.applyLang();
+    Platform.listen();
+    Platform.sendReady();
+    Platform.loadPlayer();
+    return true;
+  },
+
+  // Язык интерфейса площадки (п. 2.14). Выбор игрока важнее: его ставит
+  // applySettings, и тогда langChosen уже поднят.
+  applyLang() {
+    try {
+      const env = Platform.ysdk && Platform.ysdk.environment;
+      const code = env && env.i18n && env.i18n.lang;
+      if (!code || Storage.data.langChosen) return false;
+      if (!setLang(normalizeLang(code))) return false;
+      requestRender();     // SDK приезжает после первого кадра: он уже нарисован
+      return true;
+    } catch (e) {
+      return false;
+    }
+  },
+
+  // Пауза площадки: реклама, окно покупок, уход со вкладки. Единственная связка,
+  // про которую доки прямо пишут, что она закрывает требования 1.3 и 4.7.
+  // Платформа показывает межстраничную рекламу на старте всех игр, и колбэков
+  // у неё нет — глушить звук можно только отсюда.
+  listen() {
+    try {
+      if (!Platform.ysdk.on) return false;
+      Platform.ysdk.on('game_api_pause', () => setPageActive(false));
+      Platform.ysdk.on('game_api_resume', () => setPageActive(true));
+      return true;
+    } catch (e) {
+      return false;
+    }
+  },
+
+  // Игра готова к игроку. Ресурсов у нас нет вовсе, поэтому готовность наступает
+  // в конце init(); SDK может приехать и раньше, и позже — вызов делает тот, кто
+  // пришёл вторым.
+  markGameReady() {
+    Platform.gameReady = true;
+    return Platform.sendReady();
+  },
+
+  sendReady() {
+    if (Platform.readySent || !Platform.gameReady || !Platform.ysdk) return false;
+    try {
+      const features = Platform.ysdk.features;
+      const api = features && features.LoadingAPI;
+      if (api && api.ready) api.ready();
+      Platform.readySent = true;
+      return true;
+    } catch (e) {
+      return false;
+    }
+  },
+
+  // Разметка геймплея (п. 1.19.3). Площадка требует строгого чередования: два
+  // start подряд — уже замечание. Поэтому наружу торчит «идёт / не идёт», а
+  // парность держит флаг здесь, а не расставленные по коду вызовы.
+  setPlaying(active) {
+    if (Platform.playing === active) return false;
+    Platform.playing = active;
+    try {
+      const features = Platform.ysdk && Platform.ysdk.features;
+      const api = features && features.GameplayAPI;
+      if (!api) return true;
+      if (active && api.start) api.start();
+      if (!active && api.stop) api.stop();
+    } catch (e) {
+      // разметка не критична: партия продолжается
+    }
+    return true;
+  },
+
+  // Игрок и его облако. getPlayer работает и без авторизации: платформа хранит
+  // прогресс и анонимному игроку.
+  loadPlayer() {
+    try {
+      if (!Platform.ysdk.getPlayer) return false;
+      Platform.ysdk.getPlayer().then((player) => {
+        Platform.player = player;
+        if (!player || !player.getData) return;
+        player.getData().then(Platform.receiveCloud, () => {});
+      }, () => {});
+      return true;
+    } catch (e) {
+      return false;
+    }
+  },
+
+  receiveCloud(remote) {
+    if (!Storage.mergeCloud(remote)) return false;
+    adoptStorageProgress();   // партия уже идёт: рекорд и кошелёк в ней живые
+    return true;
+  },
+
+  // Снимок в облако. Два предохранителя поверх отложенной записи Storage: flush()
+  // зовётся ещё и в конце партии, и при уходе со вкладки, а лимит площадки —
+  // 100 записей за 5 минут. Возвращает, что случилось с вызовом: тесты смотрят
+  // именно на это, потому что setTimeout в них выполняется немедленно.
+  //
+  // Первый предохранитель — не слать одно и то же. Площадка шлёт
+  // game_api_pause/resume на каждую потерю фокуса вкладки, а каждая пауза делает
+  // flush(): без этой проверки переключение вкладок туда-сюда съедало бы лимит,
+  // ничего при этом не сохраняя.
+  saveCloud(data) {
+    if (!Platform.player || !Platform.player.setData) return 'no-sdk';
+    const json = JSON.stringify(data);
+    if (json === Platform.lastSent) return 'same';
+    const now = Date.now();
+    if (now - Platform.lastCloudMs < CONFIG.platform.cloudMinMs) {
+      if (Platform.cloudPending) return 'queued';
+      Platform.cloudPending = true;
+      setTimeout(Platform.flushCloud, CONFIG.platform.cloudMinMs);
+      return 'queued';
+    }
+    return Platform.send(data);
+  },
+
+  flushCloud() {
+    Platform.cloudPending = false;
+    if (JSON.stringify(Storage.data) === Platform.lastSent) return;
+    Platform.send(Storage.data);
+  },
+
+  send(data) {
+    Platform.lastCloudMs = Date.now();
+    Platform.lastSent = JSON.stringify(data);
+    try {
+      const promise = Platform.player.setData(data);
+      if (promise && promise.then) promise.then(() => {}, () => {});
+      return 'sent';
+    } catch (e) {
+      return 'failed';
     }
   }
 };
@@ -1281,6 +1586,10 @@ const Audio = {
   startMusic() {
     const m = CONFIG.audio.music;
     if (!Audio.ctx || Audio.music.timer || !m.gain || !m.volume) return false;
+    // Контекст может быть ещё не разрешён браузером: ctx.resume() асинхронный, а
+    // до его конца планировать ноты нельзя — Chrome пишет в консоль «AudioContext
+    // was not allowed to start» на каждую (Phase 40, найдено на playtest под SDK).
+    if (Audio.ctx.state !== 'running') return false;
     const ctx = Audio.ctx;
     // Узел переживает выключение музыки: игрок может вернуть громкость, и второй
     // выход к тому же master дал бы лишний узел на каждое переключение.
@@ -1321,14 +1630,30 @@ const Audio = {
     return true;
   },
 
+  // Пробуждение асинхронно, и это важно: ctx.resume() возвращает промис, а до его
+  // выполнения контекст ещё спит. Заводить музыку сразу нельзя — ноты уйдут в
+  // спящий контекст, и браузер отругается на каждую.
   resume() {
     try {
-      if (Audio.ctx && Audio.ctx.state === 'suspended') Audio.ctx.resume();
+      if (Audio.ctx && Audio.ctx.state === 'suspended') {
+        const waking = Audio.ctx.resume();
+        if (waking && waking.then) {
+          waking.then(Audio.afterResume, () => {});
+          return true;
+        }
+      }
     } catch (e) {
       /* контекста нет — будить нечего */
     }
+    return Audio.afterResume();
+  },
+
+  afterResume() {
+    // Контекст мог и не проснуться: без жеста игрока браузер держит его спящим.
+    // Тогда музыку заведёт следующий unlock() из касания.
+    if (!Audio.ctx || Audio.ctx.state !== 'running') return false;
     // планировщик заводится заново: пока вкладка спала, его часы ушли вперёд
-    Audio.music.nextAt = Audio.ctx ? Audio.ctx.currentTime : 0;
+    Audio.music.nextAt = Audio.ctx.currentTime;
     Audio.startMusic();
     return true;
   },
@@ -1337,6 +1662,8 @@ const Audio = {
   // прыгают на секунду за кадр), и цикл без предела крутился бы вечно.
   pumpMusic() {
     if (!Audio.ctx || !Audio.music.out) return false;
+    // Вкладку могли усыпить мимо нашего suspend(): в спящий контекст ноты не кладём
+    if (Audio.ctx.state !== 'running') return false;
     const m = CONFIG.audio.music;
     const stepSec = Audio.stepSec();
     const until = Audio.ctx.currentTime + m.scheduleAhead;
@@ -3552,7 +3879,10 @@ const input = {
     for (let i = 0; i < langs.length; i++) {
       if (input.hitRect(render.langButtonRect(i), point.x, point.y)) {
         setLang(langs[i]);
-        persistSettings();     // выбранный руками язык важнее языка браузера
+        // выбранный руками язык важнее и языка браузера, и языка площадки:
+        // отметку ставит только этот переключатель (Phase 40)
+        Storage.data.langChosen = true;
+        persistSettings();
         requestRender();
         return true;
       }
@@ -3736,6 +4066,7 @@ const input = {
       if (state.statsScreen && state.statsScreen.open) {
         if (input.hitRect(render.restartButtonRect(), point.x, point.y)) {
           state.statsScreen.open = false;
+          syncGameplay(state);
           requestRender();
         }
         return;
@@ -4039,6 +4370,7 @@ const GameState = {
   settings: null,      // экран настроек: {open, t, drag} — drag это индекс ползунка
   quickPanel: null,    // быстрая панель у шестерёнки: {open, t} (Phase 41)
   hoverKey: null,      // ключ подсвеченной свободной ячейки под стопкой
+  pageActive: true,    // вкладка на виду и площадка не показывает рекламу (Phase 40)
   radius: CONFIG.board.radiusSteps[0].radius,   // текущий радиус поля
   // Камера: rotation — что нарисовано, target — куда ведёт палец, velocity —
   // инерция после отпускания (рад/мс). Раздельно они нужны ради плавности:
@@ -4770,6 +5102,7 @@ function checkGameOver(state) {
   // признак рекорда считается так же, как в оверлее: updateBest уже отработал
   Audio.over(state.score >= state.best && state.score > 0);
   Haptics.vibrate(CONFIG.haptics.over);
+  syncGameplay(state);                    // геймплей кончился — площадке сообщаем
   startFx(state);
 }
 
@@ -4810,6 +5143,7 @@ function revive(state) {
   state.handAnim = { old: [null, null, null], t: 0 };
   Audio.deal();
   updateMusicTension(state);
+  syncGameplay(state);        // партия продолжается — геймплей снова идёт
   startFx(state);
   requestRender();
   return true;
@@ -4819,6 +5153,7 @@ function revive(state) {
 // меняется только в конце партии, а экран поверх оверлея её и показывает.
 function openStats(state) {
   state.statsScreen = { open: true, values: Storage.data.stats, t: 0 };
+  syncGameplay(state);
   startFx(state);             // экран проявляется, а не выпрыгивает
   requestRender();
 }
@@ -4831,6 +5166,7 @@ function openStats(state) {
 function openSettings(state) {
   state.settings = { open: true, t: 0, drag: null };
   state.quickPanel = null;    // полный экран заменяет быструю панель целиком
+  syncGameplay(state);        // меню — это пауза (п. 1.19.3)
   startFx(state);             // экран проявляется, а не выпрыгивает
   requestRender();
 }
@@ -4891,6 +5227,7 @@ function quickToggle(state, key) {
 function closeSettings(state) {
   state.settings = null;
   persistSettings();
+  syncGameplay(state);
   requestRender();
 }
 
@@ -4962,6 +5299,7 @@ function restart() {
   // во время init контекста ещё нет — первая раздача проходит молча сама собой
   Audio.deal();
   updateMusicTension(GameState);
+  syncGameplay(GameState);        // новая партия — геймплей начался (Phase 40)
   requestRender();
 }
 
@@ -5007,9 +5345,12 @@ function exposeQaHooks() {
   window.__SET_SEED__ = (value) => { generators.rng.seed(value); restart(); };
 }
 
-// Вкладка ушла из виду или вернулась. Отдельной функцией, потому что позже на
-// неё же ляжет game_api_pause/resume площадки: у них та же работа.
+// Вкладка ушла из виду или вернулась. На эту же функцию с Phase 40 повешены
+// game_api_pause/resume площадки: у них та же работа — реклама и сворачивание
+// браузера для игры неразличимы.
 function setPageActive(active) {
+  GameState.pageActive = active;
+  syncGameplay(GameState);
   if (active) {
     Audio.resume();
     return true;
@@ -5017,6 +5358,29 @@ function setPageActive(active) {
   Audio.suspend();
   Storage.flush();     // отложенная запись до закрытия вкладки могла не успеть
   return false;
+}
+
+// Идёт ли прямо сейчас то, что площадка считает геймплеем (п. 1.19.3). Считаем
+// из состояния, а не расставляем парные start/stop по коду: экраны открываются
+// поверх оверлея конца, и вручную чередование не удержать — а два start подряд
+// это замечание модерации.
+function gameplayActive(state) {
+  return state.pageActive !== false && !state.isGameOver &&
+    !(state.settings && state.settings.open) &&
+    !(state.statsScreen && state.statsScreen.open);
+}
+
+function syncGameplay(state) {
+  return Platform.setPlaying(gameplayActive(state));
+}
+
+// Облако площадки приехало и слилось с локальным снимком: партия уже идёт, и
+// живые рекорд с кошельком надо подтянуть на месте.
+function adoptStorageProgress() {
+  if (Storage.data.best > GameState.best) GameState.best = Storage.data.best;
+  if (Storage.data.coins > GameState.coins) GameState.coins = Storage.data.coins;
+  requestRender();
+  return true;
 }
 
 function init() {
@@ -5044,6 +5408,10 @@ function init() {
       () => setPageActive(!document.hidden));
   }
   exposeQaHooks();
+  // Площадка подключается последней и параллельно: ресурсов у игры нет, ждать
+  // сеть ей незачем — она уже готова, о чём и сообщает markGameReady (Phase 40).
+  Platform.markGameReady();
+  Platform.load();
 }
 
 init();

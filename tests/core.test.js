@@ -49,12 +49,20 @@ const canvasStub = {
 // createElement нужен для offscreen-канваса, в который кэшируется фон темы;
 // addEventListener и hidden — для паузы по visibilitychange (Phase 39)
 const documentHandlers = {};
+// Созданные элементы: по ним проверяется подключение SDK площадки (Phase 40) —
+// тег скрипта заводится из кода, а не лежит в разметке.
+const createdElements = [];
 const documentStub = {
   hidden: false,
   getElementById: () => canvasStub,
-  createElement: () => ({ width: 0, height: 0, getContext: () => ctxStub }),
-  // body нужен applyTheme: цвет полей вокруг канваса берётся из темы (Phase 41)
-  body: { style: {} },
+  createElement: (tag) => {
+    const el = { tag, width: 0, height: 0, getContext: () => ctxStub };
+    createdElements.push(el);
+    return el;
+  },
+  // body нужен applyTheme: цвет полей вокруг канваса берётся из темы (Phase 41);
+  // appendChild — тегу SDK площадки (Phase 40)
+  body: { style: {}, appendChild: () => {} },
   addEventListener: (type, fn) => { documentHandlers[type] = fn; }
 };
 const locationStub = { search: '', host: 'localhost' };
@@ -118,8 +126,8 @@ const navigatorStub = { vibrate: (pattern) => { vibrations.push(pattern); return
 const builtPaths = [];
 function Path2DStub(d) { this.d = d; builtPaths.push(d); }
 
-js += '\nmodule.exports = { CONFIG, Storage, Haptics, Audio, hexMath, generators, mergeEngine,' +
-  ' GameState, render,' +
+js += '\nmodule.exports = { CONFIG, Storage, Platform, Haptics, Audio, hexMath, generators,' +
+  ' mergeEngine, GameState, render, syncGameplay, gameplayActive, normalizeLang,' +
   ' input, restart, updateActiveColors, renderGameToText, radiusForScore, growBoardIfNeeded,' +
   ' resetCamera, nearestSnapAngle, snapRotation, THEMES, applyTheme, updateMusicTension,' +
   ' openSettings, closeSettings, openStats, applySettings, persistSettings, setPageActive,' +
@@ -133,7 +141,8 @@ new Function('module', 'localStorage', 'requestAnimationFrame', 'document', 'per
   'navigator', 'Path2D', js)
   (mod, localStorageStub, raf, documentStub, perf, timeout, windowStub, locationStub,
    AudioContextStub, setIntervalStub, clearIntervalStub, navigatorStub, Path2DStub);
-const { CONFIG, Storage, Haptics, Audio, hexMath, generators, mergeEngine, GameState, render,
+const { CONFIG, Storage, Platform, Haptics, Audio, hexMath, generators, mergeEngine,
+  GameState, render, syncGameplay, gameplayActive, normalizeLang,
   input, restart,
   updateActiveColors, renderGameToText, radiusForScore, growBoardIfNeeded,
   resetCamera, nearestSnapAngle, snapRotation, THEMES, applyTheme,
@@ -3475,6 +3484,387 @@ const colorScores = CONFIG.board.radiusSteps.map(s => s.fromScore);
 check('порог сгорания не растёт там же, где добавляется цвет',
   thresholdScores.every((score, i) => i === 0 || !colorScores.includes(score)),
   'совпало на ' + thresholdScores.filter((s, i) => i > 0 && colorScores.includes(s)));
+
+console.log('\n--- Phase 40: платформенный слой (SDK Яндекс Игр) ---');
+
+// Заглушка SDK. Промисы синхронные: набор тестов не умеет ждать микротаски
+// (отчёт печатается раньше них), поэтому и Platform написан на .then(), а не на
+// await — с await ни одна проверка ниже не успела бы отработать.
+const syncThen = (value) => ({
+  then: (onOk) => { if (onOk) onOk(value); return syncThen(value); }
+});
+const sdkLog = [];
+function makeYsdk(opts) {
+  opts = opts || {};
+  const handlers = {};
+  const player = {
+    getData: () => syncThen(opts.cloud),
+    setData: (data) => { sdkLog.push({ kind: 'setData', data }); return syncThen(); }
+  };
+  return {
+    handlers,
+    features: {
+      LoadingAPI: { ready: () => sdkLog.push({ kind: 'ready' }) },
+      GameplayAPI: {
+        start: () => sdkLog.push({ kind: 'start' }),
+        stop: () => sdkLog.push({ kind: 'stop' })
+      }
+    },
+    environment: { app: { id: '42' }, i18n: { lang: opts.lang || 'ru' } },
+    on: (name, fn) => { handlers[name] = fn; },
+    getPlayer: () => (opts.noPlayer ? syncThen(null) : syncThen(player))
+  };
+}
+const resetPlatform = () => {
+  Platform.ysdk = null;
+  Platform.player = null;
+  Platform.readySent = false;
+  Platform.playing = false;
+  Platform.lastCloudMs = 0;
+  Platform.cloudPending = false;
+  sdkLog.length = 0;
+  delete windowStub.YaGames;
+};
+const kinds = () => sdkLog.map(n => n.kind).join(',');
+// только разметка геймплея: сохранения идут в тот же журнал и мешают читать
+const marks = () => sdkLog.filter(n => n.kind === 'start' || n.kind === 'stop')
+  .map(n => n.kind).join(',');
+
+// 1. без площадки игра остаётся автономной — двойной клик, GitHub Pages, balance.js
+resetPlatform();
+check('без SDK площадки нет', Platform.hasSdk() === false);
+check('без SDK облако молчит, а localStorage пишется', (() => {
+  Storage.data.best = 1234;
+  const cloud = Platform.saveCloud(Storage.data);
+  return cloud === 'no-sdk' && Storage.flush() === true &&
+    JSON.parse(store[CONFIG.storage.key]).best === 1234;
+})());
+check('без SDK разметка геймплея никого не роняет', (() => {
+  restart();
+  openSettings(GameState);
+  closeSettings(GameState);
+  return sdkLog.length === 0;
+})());
+check('без SDK ход проходит как обычно', (() => {
+  restart();
+  const free = generators.freeCells(GameState)[0];
+  input.placeStack(GameState, { tiles: [0, 0], cell: null }, free);
+  return !!free.stack && sdkLog.length === 0;
+})());
+
+// 2. подключение: тег скрипта заводится из кода, адрес один на весь файл
+resetPlatform();
+createdElements.length = 0;
+check('load() создаёт тег скрипта площадки', (() => {
+  const made = Platform.load();
+  const script = createdElements.filter(el => el.tag === 'script').pop();
+  return made === true && !!script && script.src === CONFIG.platform.sdkSrc &&
+    script.async === true && typeof script.onload === 'function';
+})(), createdElements.map(el => el.tag).join(','));
+check('путь SDK относительный — на серверах площадки он резолвится сам',
+  CONFIG.platform.sdkSrc === '/sdk.js');
+check('при двойном клике по файлу скрипт не запрашивается (чистая консоль)', (() => {
+  createdElements.length = 0;
+  locationStub.protocol = 'file:';
+  const made = Platform.load();
+  delete locationStub.protocol;
+  return made === false && createdElements.filter(el => el.tag === 'script').length === 0;
+})());
+check('на GitHub Pages скрипт тоже не запрашивается', (() => {
+  createdElements.length = 0;
+  locationStub.host = '023irene.github.io';
+  const made = Platform.load();
+  locationStub.host = 'localhost';
+  return made === false && createdElements.filter(el => el.tag === 'script').length === 0;
+})());
+check('на localhost SDK по-прежнему подключается (dev-окружение площадки)', (() => {
+  createdElements.length = 0;
+  return Platform.load() === true &&
+    createdElements.filter(el => el.tag === 'script').length === 1;
+})());
+
+// 3. LoadingAPI.ready — ровно один раз, в каком бы порядке ни приехали игра и SDK
+resetPlatform();
+check('SDK приехал после игры: ready уходит сразу', (() => {
+  Platform.gameReady = true;
+  Platform.attach(makeYsdk());
+  return kinds() === 'ready' || kinds().indexOf('ready') === 0;
+})(), kinds());
+check('второй раз ready не уходит', (() => {
+  const before = sdkLog.filter(n => n.kind === 'ready').length;
+  Platform.sendReady();
+  Platform.markGameReady();
+  return sdkLog.filter(n => n.kind === 'ready').length === before;
+})());
+resetPlatform();
+check('SDK приехал раньше готовности игры: ready ждёт', (() => {
+  Platform.gameReady = false;
+  Platform.attach(makeYsdk());
+  const early = sdkLog.filter(n => n.kind === 'ready').length;
+  Platform.markGameReady();
+  return early === 0 && sdkLog.filter(n => n.kind === 'ready').length === 1;
+})(), kinds());
+check('boot без YaGames в окне молча уходит', (() => {
+  resetPlatform();
+  return Platform.boot() === false && Platform.hasSdk() === false;
+})());
+check('boot поднимает SDK из window', (() => {
+  resetPlatform();
+  Platform.gameReady = true;
+  windowStub.YaGames = { init: () => syncThen(makeYsdk()) };
+  const booted = Platform.boot();
+  return booted === true && Platform.hasSdk() === true &&
+    sdkLog.some(n => n.kind === 'ready');
+})(), kinds());
+
+// 4. пауза площадки: реклама на старте партии колбэков не имеет, глушить звук
+// можно только по этим событиям (требования 1.3 и 4.7)
+resetPlatform();
+Platform.gameReady = true;
+const pauseSdk = makeYsdk();
+Platform.attach(pauseSdk);
+restart();
+Audio.unlock();
+Audio.startMusic();
+check('подписка на game_api_pause и resume есть',
+  typeof pauseSdk.handlers.game_api_pause === 'function' &&
+  typeof pauseSdk.handlers.game_api_resume === 'function');
+sdkLog.length = 0;
+pauseSdk.handlers.game_api_pause();
+check('пауза площадки усыпляет контекст и останавливает музыку',
+  Audio.ctx.state === 'suspended' && Audio.music.timer === null);
+check('пауза площадки останавливает и разметку геймплея',
+  kinds().indexOf('stop') !== -1 && GameState.pageActive === false, kinds());
+sdkLog.length = 0;
+pauseSdk.handlers.game_api_resume();
+check('возврат будит звук и геймплей',
+  Audio.ctx.state === 'running' && GameState.pageActive === true &&
+  kinds().indexOf('start') !== -1, kinds());
+
+// 5. GameplayAPI: площадка требует строгого чередования, два start подряд — замечание
+resetPlatform();
+Platform.gameReady = true;
+Platform.attach(makeYsdk());
+sdkLog.length = 0;
+restart();
+check('новая партия начинает геймплей', marks() === 'start', kinds());
+sdkLog.length = 0;
+restart();
+restart();
+check('повторный старт второй раз не отправляется', marks() === '', kinds());
+sdkLog.length = 0;
+openSettings(GameState);
+openStats(GameState);
+closeSettings(GameState);
+check('меню поверх меню даёт один stop', marks() === 'stop', kinds());
+GameState.statsScreen.open = false;
+syncGameplay(GameState);
+check('закрытие последнего экрана возвращает геймплей', marks() === 'stop,start', kinds());
+sdkLog.length = 0;
+GameState.isGameOver = true;
+syncGameplay(GameState);
+openStats(GameState);
+GameState.statsScreen.open = false;
+syncGameplay(GameState);
+check('на оверлее конца экраны геймплей не возобновляют', marks() === 'stop', kinds());
+check('геймплея нет, пока висит оверлей конца',
+  gameplayActive(GameState) === false);
+GameState.isGameOver = false;
+restart();
+sdkLog.length = 0;
+check('вся последовательность строго чередуется', (() => {
+  openSettings(GameState);
+  closeSettings(GameState);
+  GameState.isGameOver = true;
+  syncGameplay(GameState);
+  restart();
+  let prev = 'start';           // партия шла до первой записи
+  return sdkLog.every(n => {
+    if (n.kind !== 'start' && n.kind !== 'stop') return true;
+    if (n.kind === prev) return false;
+    prev = n.kind;
+    return true;
+  });
+})(), kinds());
+
+// 6. язык из окружения площадки (п. 2.14): выбор игрока важнее
+check('словарей два, а кодов языка у площадки десятки',
+  normalizeLang('tr') === 'en' && normalizeLang('ru-RU') === 'ru' &&
+  normalizeLang('de') === 'en' && normalizeLang(undefined) === 'en');
+check('язык берётся из environment, когда игрок не выбирал', (() => {
+  resetPlatform();
+  setLang('ru');
+  Storage.data.langChosen = false;
+  Platform.gameReady = true;
+  Platform.attach(makeYsdk({ lang: 'en' }));
+  return CONFIG.lang === 'en';
+})(), CONFIG.lang);
+check('выбор игрока площадка не перебивает', (() => {
+  resetPlatform();
+  setLang('ru');
+  Storage.data.langChosen = true;
+  Platform.gameReady = true;
+  Platform.attach(makeYsdk({ lang: 'en' }));
+  return CONFIG.lang === 'ru';
+})(), CONFIG.lang);
+check('переключатель языка в настройках поднимает отметку выбора', (() => {
+  Storage.data.langChosen = false;
+  openSettings(GameState);
+  const other = Object.keys(I18N).find(l => l !== CONFIG.lang);
+  const rect = render.langButtonRect(Object.keys(I18N).indexOf(other));
+  input.settingsDown(GameState, { x: rect.x + rect.w / 2, y: rect.y + rect.h / 2 });
+  const raised = Storage.data.langChosen === true && CONFIG.lang === other;
+  closeSettings(GameState);
+  return raised;
+})());
+setLang('ru');
+
+// 7. слияние облака: снимок приезжает после старта партии, спорное решается
+// в пользу игрока — иначе офлайн-прогресс пропадал бы при выходе в сеть
+check('облачный рекорд больше локального — берётся облачный', (() => {
+  Storage.data.best = 100;
+  Storage.data.coins = 10;
+  return Storage.mergeCloud({ version: CONFIG.storage.version, best: 500, coins: 5 }) === true &&
+    Storage.data.best === 500 && Storage.data.coins === 10;
+})(), 'best=' + Storage.data.best + ' coins=' + Storage.data.coins);
+check('облачный рекорд меньше локального — остаётся локальный', (() => {
+  Storage.data.best = 900;
+  Storage.mergeCloud({ version: CONFIG.storage.version, best: 100, coins: 900 });
+  return Storage.data.best === 900 && Storage.data.coins === 900;
+})());
+check('счётчики сливаются покомпонентно, а не целым объектом', (() => {
+  Storage.data.stats = { games: 10, burns: 2, biggestBlock: 30,
+                         longestCombo: 1, coins: 5, best: [{ score: 100, coins: 1 }] };
+  Storage.mergeCloud({ version: CONFIG.storage.version,
+    stats: { games: 3, burns: 40, biggestBlock: 12, longestCombo: 7, coins: 500,
+             best: [{ score: 800, coins: 9 }] } });
+  const s = Storage.data.stats;
+  return s.games === 10 && s.burns === 40 && s.biggestBlock === 30 &&
+    s.longestCombo === 7 && s.coins === 500 && s.best[0].score === 800;
+})(), JSON.stringify(Storage.data.stats));
+check('таблица забегов не длиннее экрана статистики',
+  Storage.data.stats.best.length <= CONFIG.ui.stats.topRuns);
+check('облако прежней версии экономики обесценено так же, как локальное', (() => {
+  Storage.data.best = 50;
+  Storage.mergeCloud({ version: CONFIG.storage.version - 1, best: 99999, coins: 99999 });
+  return Storage.data.best === 50;
+})());
+check('настройки из облака берутся только на чистом устройстве', (() => {
+  Storage.data.settings = { sfx: 0.5, music: 0.5, haptics: true, lang: 'ru' };
+  Storage.mergeCloud({ version: CONFIG.storage.version,
+                       settings: { sfx: 0, music: 0, haptics: false, lang: 'en' } });
+  const kept = Storage.data.settings.sfx === 0.5 && CONFIG.lang === 'ru';
+  Storage.data.settings = null;
+  Storage.mergeCloud({ version: CONFIG.storage.version,
+                       settings: { sfx: 0.25, music: 0.25, haptics: true, lang: 'ru' } });
+  return kept && Storage.data.settings.sfx === 0.25;
+})());
+check('показанная подсказка остаётся показанной на другом устройстве', (() => {
+  Storage.data.seen = {};
+  Storage.mergeCloud({ version: CONFIG.storage.version, seen: { threshold11: true } });
+  return Storage.data.seen.threshold11 === true;
+})());
+check('мусор вместо снимка ничего не ломает',
+  Storage.mergeCloud(null) === false && Storage.mergeCloud('ой') === false);
+check('пришедший рекорд подхватывает идущая партия', (() => {
+  restart();
+  GameState.best = 0;
+  GameState.coins = 0;
+  Storage.data.best = 7777;
+  Storage.data.coins = 333;
+  Platform.receiveCloud({ version: CONFIG.storage.version, best: 8888, coins: 444 });
+  return GameState.best === 8888 && GameState.coins === 444;
+})(), 'best=' + GameState.best + ' coins=' + GameState.coins);
+
+// 8. троттлинг облака: лимит площадки 100 записей за 5 минут, а flush() зовётся
+// ещё и в конце партии, и при уходе со вкладки
+resetPlatform();
+Platform.gameReady = true;
+Platform.attach(makeYsdk());
+Platform.lastCloudMs = 0;
+Platform.lastSent = null;
+check('первый снимок уходит в облако сразу',
+  Platform.saveCloud(Storage.data) === 'sent');
+check('подряд идущие снимки складываются в один отложенный', (() => {
+  Storage.data.best += 1;
+  const first = Platform.saveCloud(Storage.data);
+  Storage.data.best += 1;
+  const second = Platform.saveCloud(Storage.data);
+  return first === 'queued' && second === 'queued';
+})());
+// Площадка шлёт game_api_pause/resume на каждую потерю фокуса вкладки, а каждая
+// пауза делает flush(). Без этой проверки переключение вкладок съедало бы лимит.
+check('неизменившийся снимок в сеть не уходит', (() => {
+  Platform.lastCloudMs = 0;
+  Platform.lastSent = null;
+  const sent = Platform.saveCloud(Storage.data);
+  return sent === 'sent' && Platform.saveCloud(Storage.data) === 'same' &&
+    Platform.saveCloud(Storage.data) === 'same';
+})());
+check('пауза без единого хода не пишет в облако', (() => {
+  const before = sdkLog.filter(n => n.kind === 'setData').length;
+  setPageActive(false);
+  setPageActive(true);
+  setPageActive(false);
+  setPageActive(true);
+  return sdkLog.filter(n => n.kind === 'setData').length === before;
+})());
+check('окно троттлинга короче отложенной записи Storage',
+  CONFIG.platform.cloudMinMs <= CONFIG.storage.flushMs);
+check('снимок уходит целым объектом — площадка принимает его как есть', (() => {
+  const sent = sdkLog.filter(n => n.kind === 'setData').pop();
+  return !!sent && typeof sent.data === 'object' &&
+    sent.data.version === CONFIG.storage.version;
+})(), JSON.stringify(sdkLog.filter(n => n.kind === 'setData').length));
+check('игрок без getData не роняет подключение', (() => {
+  resetPlatform();
+  Platform.gameReady = true;
+  return Platform.attach(makeYsdk({ noPlayer: true })) === true;
+})());
+
+// 9. пробуждение звука асинхронно (найдено на playtest под настоящим SDK).
+// ctx.resume() возвращает промис, и до его конца контекст ещё спит: ноты,
+// разложенные в этот момент, дают «AudioContext was not allowed to start» на
+// каждую — 23 предупреждения в консоли за пару переключений вкладки.
+Audio.unlock();
+const audioCtx = Audio.ctx;
+Audio.stopMusic();
+audioCtx.state = 'suspended';
+check('в спящий контекст музыка не заводится',
+  Audio.startMusic() === false && Audio.music.timer === null);
+check('и планировщик в спящий контекст ноты не кладёт', Audio.pumpMusic() === false);
+const realResume = audioCtx.resume;
+audioCtx.resume = () => ({
+  then: (onOk) => { audioCtx.state = 'running'; if (onOk) onOk(); return { then: () => {} }; }
+});
+Audio.resume();
+check('музыка заводится после пробуждения контекста, а не до',
+  audioCtx.state === 'running' && Audio.music.timer !== null);
+audioCtx.resume = realResume;
+check('не проснувшийся контекст музыку не заводит', (() => {
+  Audio.stopMusic();
+  audioCtx.state = 'suspended';
+  const started = Audio.afterResume();
+  audioCtx.state = 'running';
+  return started === false && Audio.music.timer === null;
+})());
+Audio.stopMusic();
+
+// 10. сканеры: SDK живёт только в своей секции, внешний адрес в файле один
+const platformSection = js.slice(js.indexOf('const Platform = {'),
+                                 js.indexOf('const Haptics = {'));
+const outsidePlatform = stripComments(js.replace(platformSection, ''));
+check('слово YaGames встречается только внутри Platform',
+  !outsidePlatform.includes('YaGames') && platformSection.includes('YaGames'));
+check('вызовы SDK не разбрелись по коду',
+  !outsidePlatform.includes('features.') && !outsidePlatform.includes('getPlayer'));
+check('внешний адрес в игре ровно один — SDK площадки',
+  (stripComments(js).match(/['"][^'"]*\.js['"]/g) || []).length === 1);
+check('разметка по-прежнему без внешних подключений',
+  !/<script[^>]+src=/i.test(html) && !/<link[^>]+href=/i.test(html));
+
+resetPlatform();
+restart();
 
 console.log(ok ? '\nВСЕ ПРОВЕРКИ ПРОШЛИ' : '\nЕСТЬ ОШИБКИ');
 process.exit(ok ? 0 : 1);
