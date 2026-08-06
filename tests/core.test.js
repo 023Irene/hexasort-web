@@ -1,4 +1,4 @@
-﻿// Тесты ядра HexaSort Web — чистый Node, без npm и зависимостей (ADR-0002).
+// Тесты ядра HexaSort Web — чистый Node, без npm и зависимостей (ADR-0002).
 // Запуск:  node tests/core.test.js     (код выхода 0 = всё зелёное)
 //
 // Как это работает: вырезаем <script> из index.html и выполняем его в Node,
@@ -17,7 +17,7 @@ const perf = { now: () => (clock += 1000) };
 const raf = (fn) => fn(perf.now());
 const timeout = (fn) => fn();
 
-// localStorage с настоящим хранилищем — нужен для проверки рекорда
+// localStorage с настоящим хранилищем — нужен для проверки сохранений
 const store = {};
 const localStorageStub = {
   getItem: (k) => (k in store ? store[k] : null),
@@ -46,16 +46,22 @@ const canvasStub = {
   getContext: () => ctxStub,
   setPointerCapture: () => {}
 };
-// createElement нужен для offscreen-канваса, в который кэшируется фон темы
+// createElement нужен для offscreen-канваса, в который кэшируется фон темы;
+// addEventListener и hidden — для паузы по visibilitychange (Phase 39)
+const documentHandlers = {};
 const documentStub = {
+  hidden: false,
   getElementById: () => canvasStub,
-  createElement: () => ({ width: 0, height: 0, getContext: () => ctxStub })
+  createElement: () => ({ width: 0, height: 0, getContext: () => ctxStub }),
+  // body нужен applyTheme: цвет полей вокруг канваса берётся из темы (Phase 41)
+  body: { style: {} },
+  addEventListener: (type, fn) => { documentHandlers[type] = fn; }
 };
 const locationStub = { search: '', host: 'localhost' };
 
 // Заглушка Web Audio: настоящих узлов нет, каждый источник звука пишет в журнал
-// свою частоту и момент запуска — по нему и делаются проверки, как по store для
-// localStorage. audioNow — это ctx.currentTime, тесты двигают его вручную.
+// свою частоту и момент запуска — по нему и делаются проверки.
+// audioNow — это ctx.currentTime, тесты двигают его вручную.
 let audioContexts = 0;
 let audioNow = 0;
 const audioLog = [];
@@ -73,6 +79,7 @@ function AudioContextStub() {
   this.state = 'running';
   this.destination = { connect: () => {} };
   this.resume = () => { this.state = 'running'; };
+  this.suspend = () => { this.state = 'suspended'; };
   Object.defineProperty(this, 'currentTime', { get: () => audioNow });
   this.createGain = () => ({ gain: audioNode(), connect: () => {} });
   this.createOscillator = () => {
@@ -111,29 +118,32 @@ const navigatorStub = { vibrate: (pattern) => { vibrations.push(pattern); return
 const builtPaths = [];
 function Path2DStub(d) { this.d = d; builtPaths.push(d); }
 
-js += '\nmodule.exports = { CONFIG, Platform, Audio, hexMath, generators, mergeEngine, GameState, render,' +
+js += '\nmodule.exports = { CONFIG, Storage, Haptics, Audio, hexMath, generators, mergeEngine,' +
+  ' GameState, render,' +
   ' input, restart, updateActiveColors, renderGameToText, radiusForScore, growBoardIfNeeded,' +
   ' resetCamera, nearestSnapAngle, snapRotation, THEMES, applyTheme, updateMusicTension,' +
-  ' openSettings, closeSettings, applySettings, persistSettings,' +
+  ' openSettings, closeSettings, openStats, applySettings, persistSettings, setPageActive,' +
   ' I18N, t, setLang, detectLang, layoutUi, canvasHeightFor, captureUiBase,' +
-  ' announceThreshold, loadStats, saveRunStats, emptyStats,' +
-  ' updateBest, flowDuration, spawnBurnFx, revive, canRevive, reviveCost,' +
-  ' leagueTier, leagueLabel };';
+  ' announceThreshold, saveRunStats, emptyStats,' +
+  ' updateBest, flowDuration, spawnBurnFx, revive, canRevive, reviveCost, animate,' +
+  ' toggleQuickPanel, closeQuickPanel, quickToggle, quickToggleOn };';
 const mod = { exports: {} };
 new Function('module', 'localStorage', 'requestAnimationFrame', 'document', 'performance',
   'setTimeout', 'window', 'location', 'AudioContext', 'setInterval', 'clearInterval',
   'navigator', 'Path2D', js)
   (mod, localStorageStub, raf, documentStub, perf, timeout, windowStub, locationStub,
    AudioContextStub, setIntervalStub, clearIntervalStub, navigatorStub, Path2DStub);
-const { CONFIG, Platform, Audio, hexMath, generators, mergeEngine, GameState, render, input, restart,
+const { CONFIG, Storage, Haptics, Audio, hexMath, generators, mergeEngine, GameState, render,
+  input, restart,
   updateActiveColors, renderGameToText, radiusForScore, growBoardIfNeeded,
   resetCamera, nearestSnapAngle, snapRotation, THEMES, applyTheme,
-  updateMusicTension, openSettings, closeSettings, applySettings,
-  persistSettings, I18N, t, setLang, detectLang,
+  updateMusicTension, openSettings, closeSettings, openStats,
+  applySettings, persistSettings, setPageActive,
+  I18N, t, setLang, detectLang,
   layoutUi, canvasHeightFor, captureUiBase, announceThreshold,
-  loadStats, saveRunStats, emptyStats, updateBest,
-  flowDuration, spawnBurnFx, revive, canRevive, reviveCost,
-  leagueTier, leagueLabel } = mod.exports;
+  saveRunStats, emptyStats, updateBest,
+  flowDuration, spawnBurnFx, revive, canRevive, reviveCost, animate,
+  toggleQuickPanel, closeQuickPanel, quickToggle, quickToggleOn } = mod.exports;
 
 // Звук между проверками надо гасить: журнал общий, а троттлинг помнит прошлый вызов
 const audioReset = () => { audioLog.length = 0; Audio.lastAt = {}; };
@@ -506,7 +516,7 @@ check('кнопка «Заново» даёт свежее поле и счёт 
   GameState.hand.slots.filter(Boolean).length === 3);
 
 // 5. рекорд растёт прямо во время партии, не только в конце
-store[CONFIG.storage.bestKey] = '0';
+Storage.data.best = 0;
 setBoardForBurn();
 GameState.best = 0;
 GameState.score = 0;
@@ -514,8 +524,8 @@ playBurnMove();
 check('сгорание блока в порог дало ровно свои очки', GameState.score === BURN_POINTS,
   'score=' + GameState.score);
 check('рекорд подтянулся во время партии, до её конца',
-  GameState.best === GameState.score && store[CONFIG.storage.bestKey] === String(GameState.score),
-  'best=' + GameState.best + ' stored=' + store[CONFIG.storage.bestKey]);
+  GameState.best === GameState.score && Storage.data.best === GameState.score,
+  'best=' + GameState.best + ' storage=' + Storage.data.best);
 
 // имитируем конец партии: поле забито трёхцветной раскраской (слияний не будет),
 // рука непуста, счёт выше прежнего рекорда
@@ -525,11 +535,10 @@ GameState.score = 777;
 cell('0,0').stack = null;
 input.placeStack(GameState, { tiles: [0], cell: null }, cell('0,0'));
 check('рекорд обновился в состоянии', GameState.best === 777, 'best=' + GameState.best);
-check('рекорд записан в хранилище через Platform',
-  store[CONFIG.storage.bestKey] === '777', 'stored=' + store[CONFIG.storage.bestKey]);
-check('Platform.loadBest читает записанный рекорд', Platform.loadBest() === 777);
+check('рекорд записан в хранилище',
+  Storage.data.best === 777, 'stored=' + Storage.data.best);
 
-// 6. рекорд переживает перезагрузку (restart читает из хранилища)
+// 6. рекорд переживает новую партию (restart читает из хранилища)
 restart();
 check('после restart счёт 0, рекорд на месте',
   GameState.score === 0 && GameState.best === 777 && GameState.isGameOver === false);
@@ -541,7 +550,7 @@ GameState.score = 100;
 cell('0,0').stack = null;
 input.placeStack(GameState, { tiles: [0], cell: null }, cell('0,0'));
 check('счёт ниже рекорда не перезаписывает рекорд',
-  GameState.best === 777 && store[CONFIG.storage.bestKey] === '777');
+  GameState.best === 777 && Storage.data.best === 777);
 
 // 8. клавиша R
 check('обработчик keydown повешен', typeof windowHandlers.keydown === 'function');
@@ -557,15 +566,15 @@ GameState.isAnimating = false;
 windowHandlers.keydown({ code: 'KeyT' });
 check('другая клавиша игру не сбрасывает', GameState.score === 55);
 
-// 9. localStorage — только внутри Platform (требование ADR/спеки §13)
-const platformSection = js.slice(js.indexOf('const Platform = {'), js.indexOf('const hexMath = {'));
+// 9. localStorage — только внутри Storage (требование спеки §13)
+const storageSection = js.slice(js.indexOf('const Storage = {'), js.indexOf('const Haptics = {'));
 // сравниваем только код: строки-комментарии выбрасываем
 const stripComments = (src) => src.split('\n').filter(l => !l.trim().startsWith('//')).join('\n');
-const outside = stripComments(js.replace(platformSection, ''));
-check('обращений к localStorage вне Platform нет',
+const outside = stripComments(js.replace(storageSection, ''));
+check('обращений к localStorage вне Storage нет',
   !outside.includes('localStorage'),
-  'найдено вне Platform: ' + (outside.match(/localStorage/g) || []).length);
-check('внутри Platform localStorage используется', platformSection.includes('localStorage'));
+  'найдено вне Storage: ' + (outside.match(/localStorage/g) || []).length);
+check('внутри Storage localStorage используется', storageSection.includes('localStorage'));
 
 console.log('\n--- Phase 5: полировка и кривая сложности ---');
 
@@ -722,16 +731,13 @@ navigatorStub.language = 'en-US';
 check('любой другой — английский', detectLang() === 'en');
 navigatorStub.language = 'ru-RU';
 
-// 4. переключатель в настройках: меняет язык и сохраняет выбор
+// 4. переключатель в настройках меняет язык, и выбор переживает новую партию
 setLang('ru');
 restart();
 openSettings(GameState);
 const enButton = render.langButtonRect(langs.indexOf('en'));
 fire('pointerdown', enButton.x + enButton.w / 2, enButton.y + enButton.h / 2);
 check('кнопка EN переключает язык', CONFIG.lang === 'en');
-check('выбор языка сохранён',
-  JSON.parse(store[CONFIG.storage.settingsKey]).lang === 'en',
-  store[CONFIG.storage.settingsKey]);
 check('кадр на английском рисуется', (() => {
   try {
     render.drawAll(GameState);
@@ -741,8 +747,9 @@ check('кадр на английском рисуется', (() => {
   }
 })());
 closeSettings(GameState);
-check('applySettings поднимает язык из хранилища',
-  applySettings({ lang: 'ru' }) === true && CONFIG.lang === 'ru');
+restart();
+check('выбранный язык переживает новую партию', CONFIG.lang === 'en');
+setLang('ru');
 
 // 5. кнопки языка не наезжают на кнопку «Назад» и помещаются в канвас
 const lastLangRect = render.langButtonRect(langs.length - 1);
@@ -780,8 +787,11 @@ check('значки монеты и кубка тоже заданы путям�
   !!render.iconPaths.coin && !!render.iconPaths.trophy);
 // Phase 31: счёт и настройки въехали в тот же набор — раньше у счёта значка не
 // было вовсе, а шестерёнка рисовалась мимо системы значков
-check('у счёта и настроек тоже есть значки',
-  !!render.iconPaths.score && !!render.iconPaths.gear);
+// Звезда счёта убрана в Phase 41 (playtest), зато появились значки быстрой панели
+check('у настроек и быстрой панели есть значки',
+  !!render.iconPaths.gear && !!render.iconPaths.sound && !!render.iconPaths.note &&
+  !!render.iconPaths.vibro && !!render.iconPaths.more);
+check('звезды у счёта больше нет', !render.iconPaths.score);
 check('пути записаны в системе SVG — начинаются с команды M',
   Object.keys(render.iconPaths).every(name => {
     const icon = render.iconPaths[name];
@@ -793,8 +803,9 @@ let iconsOk = true;
 try {
   render.coinIcon(50, 50, 9);
   render.trophyIcon(400, 40, CONFIG.ui.trophySize);
-  render.drawIcon('score', 360, 62, CONFIG.ui.scoreIconSize, '#000');
   render.drawSettingsButton(GameState);
+  CONFIG.ui.quickPanel.items.forEach(item =>
+    render.drawIcon(item.icon, 100, 100, 20, '#000'));
   CONFIG.boosts.forEach(b => render.boostIcon(b.kind, 100, 100, 18));
   render.boostIcon('неизвестный', 100, 100, 18);   // чужой вид не должен ронять кадр
 } catch (e) {
@@ -821,15 +832,21 @@ check('в кэше лежат Path2D по строке пути',
 check('textWidth работает без measureText',
   render.textWidth('Рекорд: 1234', 10) === 120,
   'got ' + render.textWidth('Рекорд: 1234', 10));
-// Верх экрана переразмечен (Phase 37): рекорд с кубком слева, счёт по центру,
-// лига справа. Проверяем, что левый блок не доезжает до группы счёта.
-const scoreGroupLeft = CONFIG.canvas.width / 2 -
-  (CONFIG.ui.scoreIconSize + CONFIG.ui.scoreIconGap +
-   render.textWidth('88888', CONFIG.ui.scoreCharWidth)) / 2;
-check('строка рекорда с кубком не доезжает до счёта',
-  CONFIG.ui.bestX + CONFIG.ui.trophySize + CONFIG.ui.trophyGap +
-  render.textWidth('Рекорд: 88888', 10) < scoreGroupLeft,
-  'левый край счёта ' + scoreGroupLeft);
+// Верх экрана переразмечен (Phase 41, playtest): слева монеты, по центру счёт
+// без значка, справа рекорд с кубком. Плашки лиги нет вовсе.
+const scoreHalf = render.textWidth('88888', 29) / 2;   // 52px bold, запасной расчёт
+const bestBlockLeft = CONFIG.ui.bestRight -
+  render.textWidth('Рекорд: 88888', CONFIG.ui.bestCharWidth) -
+  CONFIG.ui.trophyGap - CONFIG.ui.trophySize;
+check('строка рекорда с кубком не доезжает до счёта справа',
+  bestBlockLeft > CONFIG.canvas.width / 2 + scoreHalf,
+  'левый край рекорда ' + bestBlockLeft.toFixed(0));
+check('рекорд не вылезает за правый край канваса',
+  CONFIG.ui.bestRight < CONFIG.canvas.width, 'bestRight=' + CONFIG.ui.bestRight);
+check('монеты слева не доезжают до счёта',
+  CONFIG.ui.coinsX + CONFIG.ui.coinRadius * 2 + 8 +
+  render.textWidth('88888', 11) < CONFIG.canvas.width / 2 - scoreHalf);
+check('плашки лиги в разметке больше нет', CONFIG.ui.league === undefined);
 
 // 4. кнопки бустов: подписей нет, значок и цена помещаются внутрь
 const barCfg = CONFIG.ui.boostBar;
@@ -853,21 +870,34 @@ check('три кнопки помещаются по ширине',
 
 console.log('\n--- Phase 19: экран настроек ---');
 
-// 1. кнопка-шестерёнка: в углу канваса и не наезжает на строку рекорда
+// 1. кнопка-шестерёнка: прижата к правому краю (Phase 41) и не задевает бусты
 const gear = render.settingsButtonRect();
 check('шестерёнка внутри канваса',
   gear.x >= 0 && gear.y >= 0 &&
   gear.x + gear.w <= CONFIG.canvas.width && gear.y + gear.h <= CONFIG.canvas.height,
   JSON.stringify(gear));
-check('строка рекорда заканчивается левее шестерёнки', CONFIG.ui.bestX < gear.x,
-  'bestX=' + CONFIG.ui.bestX + ' кнопка с ' + gear.x);
+check('шестерёнка прижата к правому краю',
+  gear.x + gear.w === CONFIG.canvas.width - CONFIG.ui.settings.button.margin,
+  'правый край кнопки ' + (gear.x + gear.w));
+const lastBoost = render.boostButtonRect(CONFIG.boosts.length - 1);
+check('шестерёнка не наезжает на последний буст',
+  gear.x > lastBoost.x + lastBoost.w,
+  'буст до ' + (lastBoost.x + lastBoost.w) + ', кнопка с ' + gear.x);
 const gearCenter = { x: gear.x + gear.w / 2, y: gear.y + gear.h / 2 };
 
-// 2. открытие и закрытие
+// 2. открытие и закрытие: с Phase 41 шестерёнка открывает быструю панель,
+// а полный экран прячется за кнопкой «ещё»
 restart();
 fire('pointerdown', gearCenter.x, gearCenter.y);
-check('клик по шестерёнке открывает настройки',
+check('клик по шестерёнке открывает быструю панель',
+  GameState.quickPanel !== null && GameState.quickPanel.open === true &&
+  GameState.settings === null);
+const moreIndex = CONFIG.ui.quickPanel.items.findIndex(i => i.key === 'more');
+const moreBtn = render.quickButtonRect(moreIndex);
+fire('pointerdown', moreBtn.x + moreBtn.w / 2, moreBtn.y + moreBtn.h / 2);
+check('кнопка «ещё» открывает полный экран настроек',
   GameState.settings !== null && GameState.settings.open === true);
+check('полный экран закрывает быструю панель', GameState.quickPanel === null);
 
 // 3. открытый экран забирает ввод целиком
 const settingsSlot = filledSlot();
@@ -897,9 +927,6 @@ check('правее дорожки значение зажато единице�
   'got ' + CONFIG.audio.volumeSfx);
 fire('pointerup', sfxTrack.x + sfxTrack.w, sfxTrack.y);
 check('отпускание завершает жест ползунка', GameState.settings.drag === null);
-check('громкость ушла в хранилище одним ключом',
-  JSON.parse(store[CONFIG.storage.settingsKey]).sfx === 1,
-  store[CONFIG.storage.settingsKey]);
 
 // 5. регулятор «Звуки» на нуле глушит эффекты, но не музыку — шины разные
 Audio.setSfxVolume(0);
@@ -933,31 +960,22 @@ fire('pointerdown', toggle.x + toggle.w / 2, toggle.y + toggle.h / 2);
 check('тумблер переключает вибрацию', CONFIG.haptics.enabled === !hapticsWas);
 vibrations.length = 0;
 CONFIG.haptics.enabled = false;
-check('выключенная вибрация не доходит до платформы',
-  Platform.vibrate(20) === false && vibrations.length === 0);
+check('выключенная вибрация никуда не уходит',
+  Haptics.vibrate(20) === false && vibrations.length === 0);
 CONFIG.haptics.enabled = true;
 
-// 8. хранилище: снимок пишется при закрытии, битое значение не ломает игру
+// 8. экран закрывается кнопкой, значения регуляторов при этом остаются живыми
 CONFIG.audio.volumeSfx = 0.4;
 CONFIG.audio.music.volume = 0.6;
 closeSettings(GameState);
 check('кнопка «Назад» закрывает экран', GameState.settings === null);
-const stored = Platform.loadSettings();
-check('настройки прочитались обратно',
-  stored.sfx === 0.4 && stored.music === 0.6 && stored.haptics === true,
-  JSON.stringify(stored));
-store[CONFIG.storage.settingsKey] = '{не json';
-check('битое значение в хранилище даёт null, а не исключение',
-  Platform.loadSettings() === null);
-check('пустые настройки ничего не меняют', applySettings(null) === false);
-check('CONFIG при этом не тронут', CONFIG.audio.volumeSfx === 0.4);
-applySettings({ sfx: 2, music: -1, haptics: 'да' });
-check('значения из хранилища зажимаются в 0…1',
-  CONFIG.audio.volumeSfx === 1 && CONFIG.audio.music.volume === 0);
-check('нестроковый выключатель вибрации игнорируется', CONFIG.haptics.enabled === true);
+check('значения регуляторов после закрытия на месте',
+  CONFIG.audio.volumeSfx === 0.4 && CONFIG.audio.music.volume === 0.6);
 
 // 9. громкости переживают новую партию — они не про партию, а про игрока
-applySettings({ sfx: 0.3, music: 0.7, haptics: false });
+Audio.setSfxVolume(0.3);
+Audio.setMusicVolume(0.7);
+CONFIG.haptics.enabled = false;
 restart();
 check('restart громкости не сбрасывает',
   CONFIG.audio.volumeSfx === 0.3 && CONFIG.audio.music.volume === 0.7);
@@ -1009,7 +1027,9 @@ check('R из открытого меню перезапускает парти�
   GameState.settings === null && GameState.score === 0);
 
 // возвращаем звук к исходному состоянию: дальше идут проверки музыки
-applySettings({ sfx: 1, music: 1, haptics: true });
+Audio.setSfxVolume(1);
+Audio.setMusicVolume(1);
+CONFIG.haptics.enabled = true;
 audioReset();
 
 console.log('\n--- Phase 18: музыка и вибрация ---');
@@ -1202,13 +1222,13 @@ audioReset();
 
 // 8. вибрация: журнал заглушки, выключатель и отсутствие гаптики
 vibrations.length = 0;
-check('вибрация уходит в navigator', Platform.vibrate(20) === true && vibrations.length === 1);
+check('вибрация уходит в navigator', Haptics.vibrate(20) === true && vibrations.length === 1);
 CONFIG.haptics.enabled = false;
-check('выключенная вибрация молчит', Platform.vibrate(20) === false && vibrations.length === 1);
+check('выключенная вибрация молчит', Haptics.vibrate(20) === false && vibrations.length === 1);
 CONFIG.haptics.enabled = true;
 const vibrateWas = navigatorStub.vibrate;
 delete navigatorStub.vibrate;
-check('без гаптики вибрация не падает', Platform.vibrate(20) === false);
+check('без гаптики вибрация не падает', Haptics.vibrate(20) === false);
 navigatorStub.vibrate = vibrateWas;
 
 // крупное сгорание отдаёт в руку — порог общий с тряской экрана
@@ -1256,7 +1276,7 @@ check('первый жест завёл контекст', Audio.ctx !== null);
 check('контекст создан ровно один раз на все жесты партии',
   audioContexts === 1, 'создано ' + audioContexts);
 
-// 2. AudioContext живёт только внутри секции Audio (как localStorage внутри Platform)
+// 2. AudioContext живёт только внутри секции Audio
 const audioSection = js.slice(js.indexOf('const Audio = {'), js.indexOf('const hexMath = {'));
 const outsideAudio = stripComments(js.replace(audioSection, ''));
 check('обращений к AudioContext вне Audio нет',
@@ -1620,7 +1640,6 @@ check('неизвестная тема игнорируется', applyTheme('н
 
 // 3. временного переключателя стилей в поставке нет
 check('кнопки «Стиль» больше нет', render.themeButtonRect === undefined);
-check('в хранилище не осталось ключа темы', CONFIG.storage.themeKey === undefined);
 
 // 4. весь цвет живёт в CONFIG и теме: сменить стиль должно быть можно,
 // не трогая код отрисовки (критерий приёмки Phase 12)
@@ -2526,8 +2545,8 @@ check('блок в порог даёт свои очки и в первой, и 
 check('одиночное сгорание в первой волне даёт столько же',
   wave1.steps[0].points === BURN_POINTS, JSON.stringify(wave1.steps));
 
-// 4. кошелёк: начисляется в живой игре, пишется через Platform, переживает restart
-delete store[CONFIG.storage.coinsKey];
+// 4. кошелёк: начисляется в живой игре, копится в хранилище, переживает restart
+Storage.data.coins = 0;
 restart();
 check('кошелёк пуст на чистом хранилище', GameState.coins === 0, 'coins=' + GameState.coins);
 // блок ровно в порог монет не даёт, поэтому кошелёк проверяем на крупном:
@@ -2540,39 +2559,13 @@ check('за блок из 13 фишек начислено столько мон
   GameState.coins === bigBurnCoins &&
   bigBurnCoins === Math.max(0, 13 - CONFIG.scoring.coinsFreeTiles),
   'coins=' + GameState.coins);
-check('кошелёк записан в хранилище через Platform',
-  store[CONFIG.storage.coinsKey] === String(bigBurnCoins),
-  'stored=' + store[CONFIG.storage.coinsKey]);
+check('кошелёк записан в хранилище',
+  Storage.data.coins === bigBurnCoins, 'stored=' + Storage.data.coins);
 restart();
 check('restart обнуляет счёт, но не кошелёк',
   GameState.score === 0 && GameState.coins === bigBurnCoins, 'coins=' + GameState.coins);
-check('Platform.loadCoins читает кошелёк', Platform.loadCoins() === bigBurnCoins);
-check('Platform.loadCoins выдерживает мусор в хранилище', (() => {
-  store[CONFIG.storage.coinsKey] = 'ой';
-  return Platform.loadCoins() === 0;
-})());
 
-// 5. миграция экономики: прогресс из старой шкалы сбрасывается один раз.
-// С версии 3 (Phase 23) сбрасывается и кошелёк: в Phase 21 сменилась формула
-// монет, и накопленные тысячи обесценили бы бусты.
-store[CONFIG.storage.bestKey] = '2288';         // рекорд, набранный в MVP
-store[CONFIG.storage.coinsKey] = '7409';        // кошелёк со старой экономики
-delete store[CONFIG.storage.economyKey];
-const migrated = Platform.migrateEconomy();
-check('первый запуск новой экономики сбрасывает старый рекорд',
-  migrated === true && store[CONFIG.storage.bestKey] === '0',
-  'best=' + store[CONFIG.storage.bestKey]);
-check('вместе с рекордом обнуляется кошелёк',
-  store[CONFIG.storage.coinsKey] === '0', 'coins=' + store[CONFIG.storage.coinsKey]);
-check('версия экономики записана',
-  store[CONFIG.storage.economyKey] === String(CONFIG.storage.economyVersion));
-store[CONFIG.storage.bestKey] = '150';          // рекорд уже в новой шкале
-store[CONFIG.storage.coinsKey] = '77';
-check('повторный запуск прогресс не трогает',
-  Platform.migrateEconomy() === false && store[CONFIG.storage.bestKey] === '150' &&
-  store[CONFIG.storage.coinsKey] === '77');
-
-console.log('\n--- Phase X: QA-хуки, seed, Platform ---');
+console.log('\n--- Phase X: QA-хуки и seed ---');
 
 // 1. фиксированный seed воспроизводит партию ход в ход
 const playScriptedGame = (seed, moves) => {
@@ -2626,31 +2619,13 @@ const afterHookSeed = dump();
 windowStub.__SET_SEED__(99);
 check('__SET_SEED__ перезапускает партию воспроизводимо', dump() === afterHookSeed);
 
-// 5. Platform: showAd остался заглушкой, пауза платформы — уже нет (Phase 20)
-check('Platform.showAd — безвредная заглушка', Platform.showAd() === undefined);
-Platform.gameplayRunning = true;
-check('пауза платформы глушит музыку и снимает геймплей',
-  Platform.onPause() === true && Audio.music.timer === null &&
-  Platform.gameplayRunning === false);
-check('возобновление возвращает музыку и геймплей',
-  Platform.onResume() === true && Audio.music.timer !== null &&
-  Platform.gameplayRunning === true);
-check('Platform.loadBest на пустом хранилище даёт 0', (() => {
-  delete store[CONFIG.storage.bestKey];
-  return Platform.loadBest() === 0;
-})());
-check('Platform.loadBest выдерживает мусор в хранилище', (() => {
-  store[CONFIG.storage.bestKey] = 'не число';
-  return Platform.loadBest() === 0;
-})());
-
-// 6. поставка: игра остаётся одним файлом без внешних зависимостей
+// 5. поставка: игра остаётся одним файлом без внешних зависимостей
 check('в index.html нет внешних подключений (script src / link / import)',
   !/<script[^>]+src=/i.test(html) && !/<link[^>]+href=/i.test(html) &&
   !/\bimport\s+.*from\b/.test(js) && !/\brequire\(/.test(js));
 check('канвас один', (html.match(/<canvas/g) || []).length === 1);
 check('все секции спеки §14 на месте',
-  ['const CONFIG', 'const I18N', 'const Platform', 'const Audio', 'const hexMath',
+  ['const CONFIG', 'const I18N', 'const Storage', 'const Haptics', 'const Audio', 'const hexMath',
     'const generators', 'const mergeEngine', 'const render', 'const input', 'const GameState']
     .every(marker => js.includes(marker)));
 
@@ -2669,15 +2644,15 @@ check('рекорд при этом продолжает расти', GameState.
 restart();
 check('новая партия снимает отметку рекорда', GameState.recordBeaten === false);
 // первая партия на чистом хранилище рекордом не считается: сравнивать не с чем
-store[CONFIG.storage.bestKey] = '0';
+Storage.data.best = 0;
 restart();
 GameState.score = 50;
 check('первый в жизни счёт вспышкой не объявляется', updateBest(GameState) === false);
 
 // 2. статистика: топ лучших партий и счётчики за всё время
-delete store[CONFIG.storage.statsKey];
+Storage.data.stats = emptyStats();
 check('на чистом хранилище статистика пуста', (() => {
-  const stats = loadStats();
+  const stats = Storage.data.stats;
   return stats.games === 0 && stats.best.length === 0 && stats.burns === 0;
 })());
 restart();
@@ -2707,15 +2682,12 @@ check('список лучших режется по CONFIG', (() => {
   return saved.best.length === CONFIG.ui.stats.topRuns &&
     saved.best[0].score >= saved.best[saved.best.length - 1].score;
 })(), 'в списке ' + saved.best.length);
-check('битый JSON в хранилище не роняет статистику', (() => {
-  store[CONFIG.storage.statsKey] = 'не json';
-  const stats = loadStats();
-  return stats.games === 0 && Array.isArray(stats.best);
-})());
+check('счётчики хранилища — тот же объект, что накопил saveRunStats',
+  Storage.data.stats === saved);
 
 // 3. счётчики партии копятся по ходу волны
 restart();
-delete store[CONFIG.storage.statsKey];
+Storage.data.stats = emptyStats();
 setBoard({ '0,0': rep(0, 4), '1,0': rep(0, 2), '1,-1': rep(0, 2), '0,-1': rep(0, 2) });
 input.placeStack(GameState, { tiles: rep(0, 2), cell: null }, cell('-1,1'));
 check('сгорания за партию посчитаны', GameState.runStats.burns >= 1,
@@ -2724,25 +2696,25 @@ check('самый крупный блок партии записан',
   GameState.runStats.biggestBlock >= mergeEngine.thresholdFor(0),
   'блок ' + GameState.runStats.biggestBlock);
 
-// 4. счётчики за всё время показываются на экране лиги (Phase 37): отдельного
-// экрана статистики больше нет — оверлей конца не выдерживал четвёртой кнопки
+// 4. счётчики сессии показываются на экране статистики. Вход остался один —
+// кнопка на оверлее конца: плашка лиги убрана в Phase 41 по playtest
 restart();
 GameState.isGameOver = true;
-const leagueBadge = render.leagueBadgeRect();
-fire('pointerdown', leagueBadge.x + leagueBadge.w / 2, leagueBadge.y + leagueBadge.h / 2);
-check('плашка лиги открывает экран',
-  GameState.leaderboard !== null && GameState.leaderboard.open === true);
-check('на экране лежат прочитанные счётчики, а не ссылка на хранилище',
-  GameState.leaderboard.stats && typeof GameState.leaderboard.stats.games === 'number');
+const statsEntry = render.statsButtonRect();
+fire('pointerdown', statsEntry.x + statsEntry.w / 2, statsEntry.y + statsEntry.h / 2);
+check('кнопка «Статистика» открывает экран',
+  GameState.statsScreen !== null && GameState.statsScreen.open === true);
+check('на экране лежат счётчики из хранилища',
+  GameState.statsScreen.values === Storage.data.stats);
 render.drawAll(GameState);                // отрисовка экрана не должна падать
-const leagueBack = render.restartButtonRect();
-fire('pointerdown', leagueBack.x + leagueBack.w / 2, leagueBack.y + leagueBack.h / 2);
-check('кнопка «Назад» закрывает экран лиги', GameState.leaderboard.open === false);
+const statsBackBtn = render.restartButtonRect();
+fire('pointerdown', statsBackBtn.x + statsBackBtn.w / 2, statsBackBtn.y + statsBackBtn.h / 2);
+check('кнопка «Назад» закрывает экран статистики', GameState.statsScreen.open === false);
 check('партия при этом не перезапустилась', GameState.isGameOver === true);
-check('кнопки статистики на оверлее больше нет',
-  render.statsButtonRect === undefined);
-check('«Рейтинг» стоит над рядом «Возрождение» и «Заново»',
-  render.leaderboardButtonRect().y + render.leaderboardButtonRect().h <=
+check('кнопки рейтинга не осталось', render.leaderboardButtonRect === undefined);
+check('плашки лиги не осталось', render.leagueBadgeRect === undefined);
+check('«Статистика» стоит над рядом «Возрождение» и «Заново»',
+  render.statsButtonRect().y + render.statsButtonRect().h <=
   render.reviveButtonRect().y);
 restart();
 
@@ -3136,36 +3108,21 @@ check('без монет поле и поражение не тронуты',
   GameState.coins === CONFIG.revive.costs[0] - 1);
 restart();
 
-// 2. лига: дивизион растёт по порогам личного рекорда
-const tiers = CONFIG.league.tiers;
-check('дивизионы заданы по возрастанию рекорда',
-  tiers.every((step, i) => i === 0 || step.fromBest > tiers[i - 1].fromBest));
-check('нулевой рекорд — первый дивизион',
-  leagueTier(0).key === tiers[0].key);
-check('высокий рекорд — последний дивизион',
-  leagueTier(tiers[tiers.length - 1].fromBest + 1000).key === tiers[tiers.length - 1].key);
-check('у каждого дивизиона есть название в обоих словарях',
-  tiers.every(step => I18N.ru[step.key] && I18N.en[step.key]));
-GameState.best = tiers[1].fromBest;
-GameState.league = null;
-check('без лидерборда плашка показывает дивизион',
-  leagueLabel(GameState) === t(tiers[1].key), leagueLabel(GameState));
-GameState.league = { rank: 42 };
-check('с лидербордом плашка показывает место',
-  leagueLabel(GameState) === t('leagueRank') + '42', leagueLabel(GameState));
-GameState.league = null;
+// 2. лига убрана целиком (Phase 41): ни разметки, ни словарей, ни кода
+check('конфига лиги не осталось', CONFIG.league === undefined);
+check('названий дивизионов в словарях не осталось',
+  !Object.keys(I18N.ru).some(k => k.startsWith('league')) &&
+  !Object.keys(I18N.en).some(k => k.startsWith('league')));
 
-// 3. новая разметка: рекорд слева, лига справа, шестерёнка в ряду бустов
-const badge = render.leagueBadgeRect();
-check('плашка лиги внутри канваса и правее счёта',
-  badge.x + badge.w <= CONFIG.canvas.width &&
-  badge.x > CONFIG.canvas.width / 2 + CONFIG.ui.scoreIconSize);
-check('монеты под строкой рекорда, а не рядом с ней',
-  CONFIG.ui.coinsY > CONFIG.ui.bestY);
+// 3. новая разметка верха (Phase 41): монеты слева, счёт по центру, рекорд справа
+check('монеты и рекорд стоят на одной строке',
+  CONFIG.ui.coinsY === CONFIG.ui.bestY);
+check('рекорд ушёл в правую половину',
+  CONFIG.ui.bestRight > CONFIG.canvas.width / 2);
 const gearNow = render.settingsButtonRect();
-const lastBoost = render.boostButtonRect(CONFIG.boosts.length - 1);
+const lastBoostNow = render.boostButtonRect(CONFIG.boosts.length - 1);
 check('шестерёнка стоит в ряду бустов, не наезжая на них',
-  gearNow.x >= lastBoost.x + lastBoost.w && gearNow.y === lastBoost.y &&
+  gearNow.x >= lastBoostNow.x + lastBoostNow.w && gearNow.y === lastBoostNow.y &&
   gearNow.x + gearNow.w <= CONFIG.canvas.width,
   JSON.stringify(gearNow));
 check('шестерёнка не спорит с кнопкой возврата поворота',
@@ -3176,138 +3133,348 @@ restart();
 GameState.isGameOver = true;
 const rev = render.reviveButtonRect();
 const again = render.restartHalfRect();
-const lb = render.leaderboardButtonRect();
+const statsBtn = render.statsButtonRect();
 check('«Возрождение» и «Заново» делят ряд и не пересекаются',
   rev.x + rev.w < again.x && rev.y === again.y);
 check('весь ряд помещается по ширине',
   rev.x >= 0 && again.x + again.w <= CONFIG.canvas.width);
-check('«Рейтинг» стоит выше ряда и внутри канваса',
-  lb.y + lb.h <= rev.y && lb.x >= 0 && lb.x + lb.w <= CONFIG.canvas.width);
+check('«Статистика» стоит выше ряда и внутри канваса',
+  statsBtn.y + statsBtn.h <= rev.y && statsBtn.x >= 0 &&
+  statsBtn.x + statsBtn.w <= CONFIG.canvas.width);
 let gameOverDrawOk = true;
 try { render.drawAll(GameState); } catch (e) { gameOverDrawOk = false; }
 check('кадр оверлея конца с новой кнопкой рисуется', gameOverDrawOk);
 restart();
 
-// Проверки рейтинга вынесены в конец и выполняются асинхронно: fetchLeaderboard
-// возвращает промис, а в Node он резолвится не раньше следующего микротаска.
-(async () => {
-  console.log('\n--- Phase 13: платформа и рейтинг ---');
+// 5. экран статистики открывается кнопкой с оверлея и закрывается «Назад»
+GameState.isGameOver = true;
+const statsFromOverlay = render.statsButtonRect();
+fire('pointerdown', statsFromOverlay.x + statsFromOverlay.w / 2,
+  statsFromOverlay.y + statsFromOverlay.h / 2);
+check('кнопка «Статистика» открывает экран',
+  GameState.statsScreen && GameState.statsScreen.open === true);
+let statsDrawOk = true;
+try { render.drawAll(GameState); } catch (e) { statsDrawOk = false; }
+check('кадр экрана статистики рисуется', statsDrawOk);
+const statsBack = render.restartButtonRect();
+fire('pointerdown', statsBack.x + statsBack.w / 2, statsBack.y + statsBack.h / 2);
+check('кнопка «Назад» закрывает экран', GameState.statsScreen.open === false);
+check('партия при этом не перезапустилась', GameState.isGameOver === true);
+check('кнопки статистики и «Заново» не пересекаются',
+  statsFromOverlay.y + statsFromOverlay.h < statsBack.y);
+restart();
 
-  // 1. локально SDK не грузится и сеть не трогается (ADR-0001 остаётся в силе)
-  locationStub.host = 'localhost';
-  check('на обычном хосте SDK не подключается', Platform.initPlatform() === false);
-  check('локально рейтинг считается недоступным', Platform.leaderboards === null);
-  check('submitScore локально молча ничего не делает', Platform.submitScore(500) === false);
+console.log('\n--- Phase 39: сохранения и устойчивость ---');
 
-  // 2. распознавание домена платформы
-  [['yandex.net', true], ['games.s3.yandex.net', true], ['app-12345.games.s3.yandex.net', true],
-   ['localhost', false], ['023irene.github.io', false], ['example.com', false]]
-    .forEach(([host, expected]) => {
-      locationStub.host = host;
-      check(`хост ${host} — ${expected ? 'платформа' : 'обычный хостинг'}`,
-        Platform.onYandexHost() === expected);
-    });
-  locationStub.host = 'localhost';
-
-  // 3. fetchLeaderboard без SDK отдаёт «недоступно», а не падает
-  const localResult = await Platform.fetchLeaderboard();
-  check('локально fetchLeaderboard возвращает недоступность',
-    localResult.available === false && localResult.entries.length === 0);
-
-  // 4. с подставным SDK: отправка и чтение работают
-  const submitted = [];
-  Platform.leaderboards = {
-    setLeaderboardScore: (name, score) => submitted.push({ name, score }),
-    getLeaderboardEntries: () => Promise.resolve({
-      userRank: 2,
-      entries: [
-        { rank: 1, score: 3200, player: { publicName: 'Первый' } },
-        { rank: 2, score: 1500, player: { publicName: 'Ты' } },
-        { rank: 3, score: 900, player: null }
-      ]
-    })
-  };
-  check('submitScore отправляет результат в лидерборд платформы',
-    Platform.submitScore(1500) === true &&
-    submitted.length === 1 && submitted[0].score === 1500 &&
-    submitted[0].name === CONFIG.platform.leaderboardName);
-  check('нулевой счёт не отправляется',
-    Platform.submitScore(0) === false && submitted.length === 1);
-
-  const boardResult = await Platform.fetchLeaderboard();
-  check('fetchLeaderboard разбирает ответ платформы',
-    boardResult.available === true && boardResult.entries.length === 3 &&
-    boardResult.playerRank === 2);
-  check('игрок без имени показывается как «Игрок»', boardResult.entries[2].name === 'Игрок');
-
-  // 5. ошибка платформы не ломает игру
-  Platform.leaderboards = {
-    setLeaderboardScore: () => { throw new Error('нет сети'); },
-    getLeaderboardEntries: () => Promise.reject(new Error('нет сети'))
-  };
-  check('падение setLeaderboardScore перехвачено', Platform.submitScore(100) === false);
-  const failed = await Platform.fetchLeaderboard();
-  check('падение getLeaderboardEntries даёт недоступность, а не исключение',
-    failed.available === false);
-
-  // 6. результат уходит в рейтинг при проигрыше
-  Platform.leaderboards = { setLeaderboardScore: (name, score) => submitted.push({ name, score }) };
-  const submittedBefore = submitted.length;
-  setBoardTricolor();
-  // счёт берём на очко ниже порога второго кольца: иначе поле вырастет прямо
-  // перед проверкой конца партии и проигрыша не будет (числа баланса меняются)
-  const loseScore = CONFIG.board.radiusSteps[1].fromScore - 1;
-  GameState.score = loseScore;
-  cell('0,0').stack = null;
-  input.placeStack(GameState, { tiles: [0], cell: null }, cell('0,0'));
-  check('при проигрыше счёт отправлен в рейтинг',
-    GameState.isGameOver === true && submitted.length === submittedBefore + 1 &&
-    submitted[submitted.length - 1].score === loseScore);
-  Platform.leaderboards = null;
-
-  // 6a. обязательная разметка платформы (Phase 20): без LoadingAPI.ready()
-  // модерация Яндекса игру не пропускает
-  const sdkCalls = [];
-  Platform.sdk = {
-    features: {
-      LoadingAPI: { ready: () => sdkCalls.push('ready') },
-      GameplayAPI: { start: () => sdkCalls.push('start'), stop: () => sdkCalls.push('stop') }
-    }
-  };
-  check('gameReady шлёт платформе сигнал готовности',
-    Platform.gameReady() === true && sdkCalls[0] === 'ready');
-  Platform.gameplayRunning = false;
-  Platform.gameplay(true);
-  check('начало партии уходит как start', sdkCalls[sdkCalls.length - 1] === 'start');
-  check('повторный start платформе не отправляется',
-    Platform.gameplay(true) === false &&
-    sdkCalls.filter(c => c === 'start').length === 1);
-  Platform.gameplay(false);
-  check('конец партии уходит как stop', sdkCalls[sdkCalls.length - 1] === 'stop');
-  Platform.sdk = { features: {} };
-  check('SDK без нужных разделов не роняет игру',
-    Platform.gameReady() === false && Platform.gameplay(true) === false);
-  Platform.sdk = null;
-  check('без SDK разметка молчит',
-    Platform.gameReady() === false && Platform.gameplay(false) === false);
-
-  // 7. экран рейтинга открывается с оверлея и закрывается кнопкой
-  GameState.isGameOver = true;
-  const ratingBtn = render.leaderboardButtonRect();
-  fire('pointerdown', ratingBtn.x + ratingBtn.w / 2, ratingBtn.y + ratingBtn.h / 2);
-  check('кнопка «Рейтинг» открывает экран',
-    GameState.leaderboard && GameState.leaderboard.open === true);
-  await Promise.resolve();                 // даём промису загрузки завершиться
-  check('локально экран сообщает о недоступности',
-    GameState.leaderboard.available === false && GameState.leaderboard.loading === false);
-  render.drawAll(GameState);               // отрисовка экрана не должна падать
-  const backBtn = render.restartButtonRect();
-  fire('pointerdown', backBtn.x + backBtn.w / 2, backBtn.y + backBtn.h / 2);
-  check('кнопка «Назад» закрывает экран рейтинга', GameState.leaderboard.open === false);
-  check('партия при этом не перезапустилась', GameState.isGameOver === true);
-  check('кнопки рейтинга и «Заново» не пересекаются', ratingBtn.y + ratingBtn.h < backBtn.y);
+// 1. запись доходит до хранилища и читается обратно
+Storage.data.best = 4321;
+Storage.data.coins = 77;
+Storage.flush();
+check('снимок ушёл в localStorage одним ключом',
+  typeof store[CONFIG.storage.key] === 'string',
+  Object.keys(store).join(', '));
+check('в снимке лежат рекорд, кошелёк и версия', (() => {
+  const saved = JSON.parse(store[CONFIG.storage.key]);
+  return saved.best === 4321 && saved.coins === 77 &&
+    saved.version === CONFIG.storage.version;
+})(), store[CONFIG.storage.key]);
+check('load поднимает сохранённое обратно', (() => {
+  Storage.data.best = 0;
+  Storage.data.coins = 0;
+  const raised = Storage.load();
+  return raised === true && Storage.data.best === 4321 && Storage.data.coins === 77;
+})());
+check('после load новая партия видит прежний рекорд и кошелёк', (() => {
   restart();
+  return GameState.best === 4321 && GameState.coins === 77;
+})(), 'best=' + GameState.best + ' coins=' + GameState.coins);
 
-  console.log(ok ? '\nВСЕ ПРОВЕРКИ ПРОШЛИ' : '\nЕСТЬ ОШИБКИ');
-  process.exit(ok ? 0 : 1);
-})();
+// 2. хранилище выдерживает мусор, чужую версию и отсутствие данных
+check('битый JSON даёт умолчания, а не исключение', (() => {
+  store[CONFIG.storage.key] = '{не json';
+  return Storage.load() === false && Storage.data.best === 0;
+})());
+check('пустое хранилище даёт умолчания', (() => {
+  delete store[CONFIG.storage.key];
+  return Storage.load() === false && Storage.data.coins === 0 &&
+    Storage.data.settings === null;
+})());
+check('мусор вместо чисел не пролезает', (() => {
+  store[CONFIG.storage.key] = JSON.stringify(
+    { version: CONFIG.storage.version, best: 'ой', coins: -50 });
+  Storage.load();
+  return Storage.data.best === 0 && Storage.data.coins === 0;
+})());
+check('прежняя версия экономики сбрасывает прогресс, но не настройки', (() => {
+  store[CONFIG.storage.key] = JSON.stringify({
+    version: CONFIG.storage.version - 1, best: 9999, coins: 8888,
+    settings: { lang: 'en' }
+  });
+  const raised = Storage.load();
+  return raised === false && Storage.data.best === 0 && Storage.data.coins === 0 &&
+    Storage.data.settings.lang === 'en';
+})());
+
+// 3. настройки переживают перезагрузку
+delete store[CONFIG.storage.key];
+Storage.load();
+Storage.data.stats = emptyStats();
+Audio.setSfxVolume(0.3);
+Audio.setMusicVolume(0.7);
+setLang('en');
+CONFIG.haptics.enabled = false;
+persistSettings();
+Storage.flush();
+check('снимок настроек записан целиком', (() => {
+  const saved = JSON.parse(store[CONFIG.storage.key]).settings;
+  return saved.sfx === 0.3 && saved.music === 0.7 && saved.lang === 'en' &&
+    saved.haptics === false;
+})(), store[CONFIG.storage.key]);
+check('applySettings раскладывает снимок обратно', (() => {
+  Audio.setSfxVolume(1);
+  setLang('ru');
+  CONFIG.haptics.enabled = true;
+  const applied = applySettings(JSON.parse(store[CONFIG.storage.key]).settings);
+  return applied === true && CONFIG.audio.volumeSfx === 0.3 && CONFIG.lang === 'en' &&
+    CONFIG.haptics.enabled === false;
+})());
+check('пустые настройки ничего не меняют', applySettings(null) === false);
+check('значения из хранилища зажимаются в 0…1', (() => {
+  applySettings({ sfx: 2, music: -1, haptics: 'да' });
+  return CONFIG.audio.volumeSfx === 1 && CONFIG.audio.music.volume === 0 &&
+    CONFIG.haptics.enabled === false;
+})());
+setLang('ru');
+Audio.setSfxVolume(1);
+Audio.setMusicVolume(1);
+CONFIG.haptics.enabled = true;
+persistSettings();
+
+// 4. статистика переживает перезагрузку (требование 1.9)
+restart();
+GameState.score = 640;
+GameState.runStats = { burns: 7, biggestBlock: 19, longestCombo: 2, coins: 12 };
+saveRunStats(GameState);
+Storage.flush();
+check('счётчики партии ушли в хранилище', (() => {
+  const saved = JSON.parse(store[CONFIG.storage.key]).stats;
+  return saved.games === 1 && saved.burns === 7 && saved.biggestBlock === 19;
+})(), store[CONFIG.storage.key]);
+
+// 5. пауза при уходе со вкладки — требование площадки 1.3
+check('обработчик visibilitychange повешен',
+  typeof documentHandlers.visibilitychange === 'function');
+Audio.unlock();
+Audio.startMusic();
+check('перед уходом музыка играет', Audio.music.timer !== null);
+documentStub.hidden = true;
+documentHandlers.visibilitychange();
+check('скрытая вкладка останавливает планировщик музыки', Audio.music.timer === null);
+check('скрытая вкладка усыпляет контекст', Audio.ctx.state === 'suspended');
+check('уход со вкладки пишет прогресс немедленно', (() => {
+  Storage.data.best = 5150;
+  documentHandlers.visibilitychange();
+  return JSON.parse(store[CONFIG.storage.key]).best === 5150;
+})());
+documentStub.hidden = false;
+documentHandlers.visibilitychange();
+check('возврат будит контекст и заводит музыку снова',
+  Audio.ctx.state === 'running' && Audio.music.timer !== null);
+check('setPageActive возвращает состояние страницы',
+  setPageActive(true) === true && setPageActive(false) === false);
+documentStub.hidden = false;
+setPageActive(true);
+
+// 6. поколение партии: незавершённая волна не достаёт до новой доски
+restart();
+const generationWas = GameState.generation;
+restart();
+check('restart поднимает номер поколения', GameState.generation === generationWas + 1);
+check('цикл прежней партии молча умирает', (() => {
+  let progressed = 0;
+  let finished = false;
+  // партия сменится прямо посреди анимации: первый тик отработает, второй уже
+  // увидит чужое поколение и не станет ни рисовать, ни звать done()
+  animate(GameState, 3000,
+    () => { progressed++; GameState.generation++; },
+    () => { finished = true; });
+  return progressed === 1 && finished === false;
+})(), 'цикл продолжил работу после смены партии');
+
+// 7. исключение в отрисовке разблокирует ввод, а не запирает игру
+check('падение цикла снимает isAnimating', (() => {
+  const drawWas = render.drawAll;
+  const errorWas = console.error;
+  console.error = () => {};                 // не сорим в вывод тестов
+  render.drawAll = () => { throw new Error('падение отрисовки'); };
+  GameState.isAnimating = true;
+  let survived = true;
+  try {
+    animate(GameState, 100, () => {}, () => {});
+  } catch (e) {
+    survived = false;                       // исключение не должно вылетать наружу
+  }
+  render.drawAll = drawWas;
+  console.error = errorWas;
+  return survived && GameState.isAnimating === false && GameState.anim === null;
+})());
+restart();
+
+// 8. требования площадки к вёрстке
+check('канвас не бывает уже, чем 1:2 (требование 1.6.2.2)',
+  CONFIG.ui.layout.maxHeight <= CONFIG.canvas.width * 2,
+  CONFIG.canvas.width + '×' + CONFIG.ui.layout.maxHeight);
+check('высокое окно упирается в потолок пропорции',
+  canvasHeightFor(400, 2000) === CONFIG.ui.layout.maxHeight);
+check('блок статистики едет вместе с высотой канваса', (() => {
+  const base = CONFIG.ui.stats.countersY;
+  layoutUi(CONFIG.ui.layout.maxHeight);
+  const moved = CONFIG.ui.stats.countersY;
+  layoutUi(CONFIG.ui.layout.baseHeight);
+  return moved > base && CONFIG.ui.stats.countersY === base;
+})());
+check('на высоком экране счётчики не наезжают на кнопку «Назад»', (() => {
+  layoutUi(CONFIG.ui.layout.maxHeight);
+  const cfg = CONFIG.ui.stats;
+  const lastRow = cfg.countersY + 4 * cfg.counterStep;
+  const back = render.restartButtonRect();
+  const ok = lastRow < back.y;
+  layoutUi(CONFIG.ui.layout.baseHeight);
+  return ok;
+})());
+check('контекстное меню по канвасу подавлено (требования 1.6.1.8 и 1.6.2.7)',
+  typeof handlers.contextmenu === 'function' && (() => {
+    let prevented = false;
+    handlers.contextmenu({ preventDefault: () => { prevented = true; } });
+    return prevented;
+  })());
+check('страница запрещает swipe-to-refresh (требование 1.10.2)',
+  /overscroll-behavior:\s*none/.test(html));
+
+console.log('\n--- Phase 41: правки по playtest ---');
+
+// 1. поля вокруг канваса красит тема, а не CSS: иначе стиль жил бы в двух местах
+check('фон страницы берётся из палитры темы',
+  documentStub.body.style.background === CONFIG.ui.bg,
+  'на body ' + documentStub.body.style.background);
+check('в CSS страницы стоит бумажный цвет, а не тёмно-синий', (() => {
+  const css = html.match(/<style>([\s\S]*?)<\/style>/)[1];
+  return !/#1E2A3A/i.test(css) && /background:\s*#EFE6D5/i.test(css);
+})());
+
+// 2. быстрая панель: столбик над шестерёнкой, внутри канваса, без пересечений
+restart();
+const quickCfg = CONFIG.ui.quickPanel;
+const gearRect = render.settingsButtonRect();
+const quickRects = quickCfg.items.map((item, i) => render.quickButtonRect(i));
+check('кнопки панели внутри канваса',
+  quickRects.every(r => r.x >= 0 && r.y >= 0 &&
+    r.x + r.w <= CONFIG.canvas.width && r.y + r.h <= CONFIG.canvas.height),
+  JSON.stringify(quickRects[quickRects.length - 1]));
+check('панель выстроена снизу вверх от шестерёнки',
+  quickRects[0].y + quickRects[0].h <= gearRect.y &&
+  quickRects.every((r, i) => i === 0 || r.y + r.h <= quickRects[i - 1].y));
+// Панель — оверлей и может лечь поверх поля, но не поверх руки: столбик стоит
+// правее самого правого слота, иначе он закрывал бы стопки, которые надо брать.
+check('столбик стоит правее руки',
+  quickRects.every(r => r.x > render.handSlotCenter(2).x + CONFIG.ui.handHexSize),
+  'левый край панели ' + quickRects[0].x);
+
+check('кнопки панели не мельче нормы в 44 px', quickRects[0].w >= 44,
+  'кружок ' + quickRects[0].w.toFixed(0));
+// панель ездит вместе с низом интерфейса: на телефоне он масштабируется (Phase 33)
+check('панель растёт вместе с высотой канваса', (() => {
+  const base = render.quickButtonRect(0).w;
+  layoutUi(CONFIG.ui.layout.maxHeight);
+  const tall = render.quickButtonRect(0);
+  const top = render.quickButtonRect(quickCfg.items.length - 1);
+  const ok = tall.w > base && top.y >= 0 &&
+    tall.x + tall.w <= CONFIG.canvas.width;
+  layoutUi(CONFIG.ui.layout.baseHeight);
+  return ok;
+})());
+
+// 3. тумблеры ходят через сеттеры Audio и переживают выключение
+Audio.setSfxVolume(0.8);
+Audio.setMusicVolume(0.6);
+toggleQuickPanel(GameState);
+check('шестерёнка открывает панель',
+  GameState.quickPanel !== null && GameState.quickPanel.open === true);
+const sfxBtn = render.quickButtonRect(quickCfg.items.findIndex(i => i.key === 'sfx'));
+fire('pointerdown', sfxBtn.x + sfxBtn.w / 2, sfxBtn.y + sfxBtn.h / 2);
+check('тумблер глушит звуки', CONFIG.audio.volumeSfx === 0);
+check('выключенный тумблер показывается выключенным', quickToggleOn('sfx') === false);
+fire('pointerdown', sfxBtn.x + sfxBtn.w / 2, sfxBtn.y + sfxBtn.h / 2);
+check('повторный тап возвращает прежнюю громкость, а не единицу',
+  Math.abs(CONFIG.audio.volumeSfx - 0.8) < 0.001, 'got ' + CONFIG.audio.volumeSfx);
+const musicBtn = render.quickButtonRect(quickCfg.items.findIndex(i => i.key === 'music'));
+fire('pointerdown', musicBtn.x + musicBtn.w / 2, musicBtn.y + musicBtn.h / 2);
+check('тумблер глушит музыку и останавливает планировщик',
+  CONFIG.audio.music.volume === 0 && Audio.music.timer === null);
+fire('pointerdown', musicBtn.x + musicBtn.w / 2, musicBtn.y + musicBtn.h / 2);
+check('музыка возвращается на прежнюю громкость',
+  Math.abs(CONFIG.audio.music.volume - 0.6) < 0.001, 'got ' + CONFIG.audio.music.volume);
+const vibroBtn = render.quickButtonRect(quickCfg.items.findIndex(i => i.key === 'haptics'));
+const hapticsBefore = CONFIG.haptics.enabled;
+fire('pointerdown', vibroBtn.x + vibroBtn.w / 2, vibroBtn.y + vibroBtn.h / 2);
+check('тумблер переключает вибрацию', CONFIG.haptics.enabled === !hapticsBefore);
+fire('pointerdown', vibroBtn.x + vibroBtn.w / 2, vibroBtn.y + vibroBtn.h / 2);
+check('настройки панели попадают в хранилище',
+  Storage.data.settings && Storage.data.settings.haptics === hapticsBefore);
+
+// 4. панель закрывается вторым тапом по шестерёнке и кликом мимо, и при этом
+// не делает хода на поле
+const gearC = { x: gearRect.x + gearRect.w / 2, y: gearRect.y + gearRect.h / 2 };
+// в тестах цикл juice синхронный и часы прыгают, поэтому закрытая панель
+// успевает доехать до нуля и исчезнуть в том же кадре
+fire('pointerdown', gearC.x, gearC.y);
+check('второй тап по шестерёнке закрывает панель', GameState.quickPanel === null);
+toggleQuickPanel(GameState);
+const emptyCellForQuick = Array.from(GameState.cells.values()).find(c => !c.stack);
+fire('pointerdown', emptyCellForQuick.pixelX, emptyCellForQuick.pixelY);
+check('клик мимо панели закрывает её', GameState.quickPanel === null);
+check('и не начинает вращение поля', input.spin === null);
+
+// 5. панель доезжает до нуля и только тогда исчезает — иначе пропадала бы
+// скачком. В тестах часы прыгают на 1000 мс за кадр, поэтому цикл juice
+// доводит её до конца за один проход.
+toggleQuickPanel(GameState);
+closeQuickPanel(GameState);
+check('закрытая панель убирается сама', GameState.quickPanel === null);
+check('выезд короче секунды (иначе цикл juice не умрёт в тестах)',
+  CONFIG.animation.quickPanelMs < 1000);
+restart();
+
+// 6. подписи кнопок оверлея конца влезают в плашки на обоих языках.
+// Ширина считается запасом (12 px на знак при bold 20px), потому что measureText
+// в тестах нет: на playtest «Возрождение» вылезало за края половинки от 240.
+const langBefore = CONFIG.lang;
+['ru', 'en'].forEach(lang => {
+  setLang(lang);
+  const rev = render.reviveButtonRect();
+  const again = render.restartHalfRect();
+  check('«' + t('revive') + '» влезает в кнопку (' + lang + ')',
+    t('revive').length * 12 <= rev.w - 16,
+    'подпись ~' + t('revive').length * 12 + ' px при кнопке ' + rev.w);
+  check('«' + t('restart') + '» влезает в кнопку (' + lang + ')',
+    t('restart').length * 12 <= again.w - 16,
+    'подпись ~' + t('restart').length * 12 + ' px при кнопке ' + again.w);
+  check('«' + t('stats') + '» влезает в кнопку (' + lang + ')',
+    t('stats').length * 11 <= render.statsButtonRect().w - 16);
+});
+setLang(langBefore);
+const rowRev = render.reviveButtonRect();
+const rowAgain = render.restartHalfRect();
+check('ряд оверлея конца не вылезает за канвас',
+  rowRev.x >= 0 && rowAgain.x + rowAgain.w <= CONFIG.canvas.width);
+check('кнопки ряда не перекрываются', rowRev.x + rowRev.w < rowAgain.x);
+
+// 7. баланс: ступени порога сгорания не совпадают с порогами цвета
+const thresholdScores = CONFIG.merge.thresholdSteps.map(s => s.fromScore);
+const colorScores = CONFIG.board.radiusSteps.map(s => s.fromScore);
+check('порог сгорания не растёт там же, где добавляется цвет',
+  thresholdScores.every((score, i) => i === 0 || !colorScores.includes(score)),
+  'совпало на ' + thresholdScores.filter((s, i) => i > 0 && colorScores.includes(s)));
+
+console.log(ok ? '\nВСЕ ПРОВЕРКИ ПРОШЛИ' : '\nЕСТЬ ОШИБКИ');
+process.exit(ok ? 0 : 1);
