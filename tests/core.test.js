@@ -134,7 +134,10 @@ js += '\nmodule.exports = { CONFIG, Storage, Platform, Haptics, Audio, hexMath, 
   ' I18N, t, setLang, detectLang, layoutUi, canvasHeightFor, captureUiBase,' +
   ' announceThreshold, saveRunStats, emptyStats,' +
   ' updateBest, flowDuration, spawnBurnFx, revive, canRevive, reviveCost, animate,' +
-  ' toggleQuickPanel, closeQuickPanel, quickToggle, quickToggleOn };';
+  ' toggleQuickPanel, closeQuickPanel, quickToggle, quickToggleOn,' +
+  ' canOfferAd, openAdPrompt, closeAdPrompt, watchAdForBoost, boostCostFor,' +
+  ' checkGameOver, canShowAdNow, showAdNotice, checkIdleAd, maybeAdOnNewHand,' +
+  ' markActivity };';
 const mod = { exports: {} };
 new Function('module', 'localStorage', 'requestAnimationFrame', 'document', 'performance',
   'setTimeout', 'window', 'location', 'AudioContext', 'setInterval', 'clearInterval',
@@ -152,7 +155,10 @@ const { CONFIG, Storage, Platform, Haptics, Audio, hexMath, generators, mergeEng
   layoutUi, canvasHeightFor, captureUiBase, announceThreshold,
   saveRunStats, emptyStats, updateBest,
   flowDuration, spawnBurnFx, revive, canRevive, reviveCost, animate,
-  toggleQuickPanel, closeQuickPanel, quickToggle, quickToggleOn } = mod.exports;
+  toggleQuickPanel, closeQuickPanel, quickToggle, quickToggleOn,
+  canOfferAd, openAdPrompt, closeAdPrompt, watchAdForBoost, boostCostFor,
+  checkGameOver, canShowAdNow, showAdNotice, checkIdleAd, maybeAdOnNewHand,
+  markActivity } = mod.exports;
 
 // Звук между проверками надо гасить: журнал общий, а троттлинг помнит прошлый вызов
 const audioReset = () => { audioLog.length = 0; Audio.lastAt = {}; };
@@ -2861,6 +2867,23 @@ check('новая партия возвращает стартовый поро�
   GameState.burnThreshold === mergeEngine.thresholdFor(0));
 
 // 5. стартовое поле раскладывается простыми стопками, даже когда рука уже сложная
+check('на стартовом поле нет двух одноцветных соседей', (() => {
+  for (let attempt = 0; attempt < 20; attempt++) {
+    restart();
+    let clean = true;
+    GameState.cells.forEach(c => {
+      if (!c.stack) return;
+      const top = c.stack.tiles[c.stack.tiles.length - 1];
+      hexMath.neighbors(c.q, c.r).forEach(n => {
+        const near = GameState.cells.get(hexMath.key(n.q, n.r));
+        if (near && near.stack &&
+            near.stack.tiles[near.stack.tiles.length - 1] === top) clean = false;
+      });
+    });
+    if (!clean) return false;
+  }
+  return true;
+})());
 check('на стартовом поле только одноцветные стопки', (() => {
   for (let attempt = 0; attempt < 20; attempt++) {
     restart();
@@ -3494,6 +3517,21 @@ const syncThen = (value) => ({
   then: (onOk) => { if (onOk) onOk(value); return syncThen(value); }
 });
 const sdkLog = [];
+// Сценарий рекламы (Phase 42). Мок отдаёт управление обратно через adPlan.finish:
+// без него нельзя проверить, что на время ролика игра действительно на паузе —
+// синхронный onClose снимал бы её в том же вызове.
+const adPlan = { hold: false, fail: false, both: false, giveReward: true,
+                 finish: () => {}, reward: () => {} };
+const reviewPlan = { value: true };
+const resetAdPlan = () => {
+  adPlan.hold = false;
+  adPlan.fail = false;
+  adPlan.both = false;
+  adPlan.giveReward = true;
+  adPlan.finish = () => {};
+  adPlan.reward = () => {};
+  reviewPlan.value = true;
+};
 function makeYsdk(opts) {
   opts = opts || {};
   const handlers = {};
@@ -3511,6 +3549,42 @@ function makeYsdk(opts) {
       }
     },
     environment: { app: { id: '42' }, i18n: { lang: opts.lang || 'ru' } },
+    adv: {
+      showFullscreenAdv: (o) => {
+        const cb = (o && o.callbacks) || {};
+        sdkLog.push({ kind: 'fullscreen' });
+        if (cb.onOpen) cb.onOpen();
+        adPlan.finish = () => {
+          if (adPlan.fail || adPlan.both) { if (cb.onError) cb.onError(); }
+          if (!adPlan.fail || adPlan.both) { if (cb.onClose) cb.onClose(true); }
+        };
+        if (!adPlan.hold) adPlan.finish();
+      },
+      showRewardedVideo: (o) => {
+        const cb = (o && o.callbacks) || {};
+        sdkLog.push({ kind: 'rewarded' });
+        if (cb.onOpen) cb.onOpen();
+        adPlan.reward = () => { if (cb.onRewarded) cb.onRewarded(); };
+        adPlan.finish = () => {
+          if (adPlan.fail) { if (cb.onError) cb.onError(); return; }
+          if (cb.onClose) cb.onClose();
+        };
+        if (!adPlan.hold) {
+          if (adPlan.giveReward) adPlan.reward();
+          adPlan.finish();
+        }
+      }
+    },
+    feedback: {
+      canReview: () => {
+        sdkLog.push({ kind: 'canReview' });
+        return syncThen({ value: reviewPlan.value, reason: 'NO_AUTH' });
+      },
+      requestReview: () => {
+        sdkLog.push({ kind: 'requestReview' });
+        return syncThen({ feedbackSent: true });
+      }
+    },
     on: (name, fn) => { handlers[name] = fn; },
     getPlayer: () => (opts.noPlayer ? syncThen(null) : syncThen(player))
   };
@@ -3522,7 +3596,10 @@ const resetPlatform = () => {
   Platform.playing = false;
   Platform.lastCloudMs = 0;
   Platform.cloudPending = false;
+  Platform.lastAdMs = 0;
+  Platform.reviewAsked = false;
   sdkLog.length = 0;
+  resetAdPlan();
   delete windowStub.YaGames;
 };
 const kinds = () => sdkLog.map(n => n.kind).join(',');
@@ -3547,7 +3624,13 @@ check('без SDK разметка геймплея никого не роняе
 })());
 check('без SDK ход проходит как обычно', (() => {
   restart();
-  const free = generators.freeCells(GameState)[0];
+  // ячейка без соседей того же цвета: иначе стопка вольётся в соседнюю (это
+  // правило игры), и проверка «ячейка занята» упала бы не по делу
+  const free = generators.freeCells(GameState).find(cell =>
+    hexMath.neighbors(cell.q, cell.r).every(n => {
+      const near = GameState.cells.get(hexMath.key(n.q, n.r));
+      return !near || !near.stack || near.stack.tiles[near.stack.tiles.length - 1] !== 0;
+    }));
   input.placeStack(GameState, { tiles: [0, 0], cell: null }, free);
   return !!free.stack && sdkLog.length === 0;
 })());
@@ -3862,6 +3945,300 @@ check('внешний адрес в игре ровно один — SDK пло�
   (stripComments(js).match(/['"][^'"]*\.js['"]/g) || []).length === 1);
 check('разметка по-прежнему без внешних подключений',
   !/<script[^>]+src=/i.test(html) && !/<link[^>]+href=/i.test(html));
+
+console.log('\n--- Phase 42: реклама и оценка ---');
+
+// 1. без площадки: всё как раньше, ни одного лишнего экрана
+resetPlatform();
+restart();
+let adDone = 0;
+check('без SDK межстраничной нет, а новая партия начинается сразу',
+  Platform.showInterstitial(() => adDone++) === 'no-sdk' && adDone === 1);
+check('без SDK оценку не запрашиваем', Platform.askReview() === 'no-sdk');
+GameState.coins = 0;
+input.toggleBoost(GameState, 'remove');
+check('без площадки буст без монет по-прежнему просто отказывает',
+  GameState.adPrompt === null && GameState.boost === null);
+check('без площадки ролик не предлагается', canOfferAd(GameState, 'remove') === false);
+
+// 2. межстраничная: через партию и не чаще кулдауна
+resetPlatform();
+Platform.gameReady = true;
+Platform.attach(makeYsdk());
+restart();
+adDone = 0;
+const shows = [Platform.showInterstitial(() => adDone++),
+               Platform.showInterstitial(() => adDone++)];
+check('первое «Заново» за сессию рекламу показывает, второе подряд — нет',
+  shows.join(',') === 'shown,cooldown', shows.join(','));
+check('партия начинается в обоих случаях', adDone === 2);
+check('после кулдауна реклама показывается снова', (() => {
+  Platform.lastAdMs = Date.now() - CONFIG.ads.interstitialMinMs - 1;
+  return Platform.showInterstitial(() => {}) === 'shown';
+})());
+check('счётчика партий у рекламы больше нет — условие одно, время',
+  CONFIG.ads.interstitialEveryRun === undefined &&
+  Platform.runsSinceAd === undefined);
+
+Platform.lastAdMs = 0;
+adPlan.both = true;
+adDone = 0;
+check('onClose и onError вместе дают ровно одну новую партию',
+  Platform.showInterstitial(() => adDone++) === 'shown' && adDone === 1);
+adPlan.both = false;
+
+Platform.lastAdMs = 0;
+adPlan.fail = true;
+adDone = 0;
+check('ошибка рекламы не оставляет игрока без новой партии',
+  Platform.showInterstitial(() => adDone++) === 'shown' && adDone === 1);
+adPlan.fail = false;
+
+// 3. пауза на время ролика (п. 4.7): звук и геймплей стоят, пока идёт реклама
+Platform.lastAdMs = 0;
+adPlan.hold = true;
+Platform.showInterstitial(() => {});
+const pausedDuringAd = GameState.pageActive === false;
+adPlan.finish();
+check('на время рекламы игра на паузе, после неё возвращается',
+  pausedDuringAd && GameState.pageActive === true);
+adPlan.hold = false;
+
+// 4. ролик за буст: предложение вместо отказа
+restart();
+GameState.coins = 0;
+sdkLog.length = 0;
+// метка на приглушённой кнопке: иначе про ролик игрок не узнает
+const iconSpy = [];
+const origDrawIcon = render.drawIcon;
+render.drawIcon = function (name) {
+  iconSpy.push(name);
+  return origDrawIcon.apply(render, arguments);
+};
+render.drawBoostBar(GameState);
+const adMarkWithSdk = iconSpy.includes('video');
+iconSpy.length = 0;
+Platform.ysdk = null;                       // тот же кадр, но площадки нет
+render.drawBoostBar(GameState);
+const adMarkWithoutSdk = iconSpy.includes('video');
+render.drawIcon = origDrawIcon;
+Platform.attach(makeYsdk());                // площадку возвращаем на место
+check('на недоступном бусте видно, что его можно взять за ролик', adMarkWithSdk);
+check('без площадки на кнопке остаётся цена, а не значок ролика', !adMarkWithoutSdk);
+sdkLog.length = 0;
+input.toggleBoost(GameState, 'remove');
+check('нет монет, но есть площадка → предлагаем ролик',
+  !!GameState.adPrompt && GameState.adPrompt.kind === 'remove');
+check('пока диалог открыт, геймплей для площадки остановлен', marks() === 'stop');
+check('диалог рисуется без ошибок', (() => {
+  render.drawAll(GameState);
+  return true;
+})());
+closeAdPrompt(GameState);
+check('«Отмена» ничего не тратит и возвращает игру',
+  GameState.adPrompt === null && GameState.boost === null &&
+  GameState.coins === 0 && marks() === 'stop,start');
+
+// 5. награда приходит только с досмотренного ролика
+restart();
+GameState.coins = 0;
+adPlan.giveReward = false;
+input.toggleBoost(GameState, 'remove');
+watchAdForBoost(GameState);
+check('закрытый на середине ролик буста не даёт',
+  GameState.freeBoost === null && GameState.boost === null &&
+  GameState.adBoostsUsed === 0);
+adPlan.giveReward = true;
+
+// 6. бесплатное применение: списывается ноль, и ровно один раз
+setBoard({ '0,0': rep(0, 2), '1,0': rep(1, 2) });
+GameState.coins = 0;
+input.toggleBoost(GameState, 'remove');
+watchAdForBoost(GameState);
+check('после досмотренного ролика буст активен и оплачен',
+  GameState.freeBoost === 'remove' && !!GameState.boost &&
+  GameState.boost.kind === 'remove' && GameState.adBoostsUsed === 1);
+input.applyBoostTo(GameState, cell('0,0'));
+check('бесплатное применение стопку убирает, а монет не берёт',
+  cell('0,0').stack === null && GameState.coins === 0);
+check('оплаченное роликом применение тратится один раз',
+  GameState.freeBoost === null);
+check('следующее применение снова стоит денег',
+  boostCostFor(GameState, 'remove') === CONFIG.boosts.find(b => b.kind === 'remove').cost);
+
+// 7. лимит роликов за партию и его сброс
+GameState.adBoostsUsed = CONFIG.ads.freeBoostsPerRun;
+GameState.coins = 0;
+input.toggleBoost(GameState, 'remove');
+check('за партию роликов не больше лимита',
+  GameState.adPrompt === null && GameState.boost === null);
+GameState.freeBoost = 'remove';
+restart();
+check('новая партия обнуляет ролики и бесплатный буст',
+  GameState.freeBoost === null && GameState.adBoostsUsed === 0 &&
+  GameState.adPrompt === null);
+
+// 8. оценка игры: canReview перед requestReview, один раз за сессию
+Platform.reviewAsked = false;
+sdkLog.length = 0;
+check('оценка запрашивается через canReview',
+  Platform.askReview() === 'asked' &&
+  kinds().includes('canReview') && kinds().includes('requestReview'));
+check('дважды за сессию оценку не просят', Platform.askReview() === 'asked-before');
+
+Platform.reviewAsked = false;
+reviewPlan.value = false;
+sdkLog.length = 0;
+Platform.askReview();
+check('запрет площадки — и окна оценки нет',
+  kinds().includes('canReview') && !kinds().includes('requestReview'));
+reviewPlan.value = true;
+
+// момент запроса: только после рекордной партии и не раньше третьей
+Platform.reviewAsked = false;
+Storage.data.stats = emptyStats();
+Storage.data.stats.games = 0;
+sdkLog.length = 0;
+setBoardTricolor();
+GameState.score = 5000;
+GameState.best = 100;
+checkGameOver(GameState);
+check('до третьей партии оценку не просят', !kinds().includes('canReview'));
+
+Platform.reviewAsked = false;
+Storage.data.stats.games = 5;
+sdkLog.length = 0;
+setBoardTricolor();
+GameState.score = 10;
+GameState.best = 9999;
+checkGameOver(GameState);
+check('без рекорда оценку не просят', !kinds().includes('canReview'));
+
+Platform.reviewAsked = false;
+Storage.data.stats.games = 5;
+sdkLog.length = 0;
+setBoardTricolor();
+GameState.score = 6000;
+GameState.best = 100;
+checkGameOver(GameState);
+check('после рекордной партии игру просят оценить', kinds().includes('canReview'));
+
+// 10. автопоказ в паузе (Phase 42.2): первая партия — только по кнопке
+resetPlatform();
+Platform.gameReady = true;
+Platform.attach(makeYsdk());
+restart();
+// созревшая реклама и наступивший простой: дальше проверяем только помехи
+const ripeAd = () => {
+  Platform.lastAdMs = Date.now() - CONFIG.ads.interstitialMinMs - 1;
+  GameState.lastActionMs = Date.now() - CONFIG.ads.idleMs - 1;
+  sdkLog.length = 0;
+};
+
+check('в первой партии реклама сама не приходит', (() => {
+  GameState.lastActionMs = Date.now() - CONFIG.ads.idleMs - 1;
+  sdkLog.length = 0;
+  return Platform.adReady() === false && checkIdleAd(GameState) === false &&
+    !kinds().includes('fullscreen');
+})());
+
+check('после первого показа и пяти минут простой даёт рекламу', (() => {
+  ripeAd();
+  const shown = checkIdleAd(GameState);
+  // setTimeout в тестах немедленный, поэтому предупреждение уже сменилось роликом
+  return shown === true && kinds().includes('fullscreen') && GameState.adNotice === null;
+})());
+
+check('сразу после ролика следующие пять минут тихо', (() => {
+  GameState.lastActionMs = Date.now() - CONFIG.ads.idleMs - 1;
+  sdkLog.length = 0;
+  return Platform.adReady() === false && checkIdleAd(GameState) === false;
+})());
+
+check('короткий простой рекламу не вызывает', (() => {
+  ripeAd();
+  markActivity(GameState);            // игрок только что сходил
+  return checkIdleAd(GameState) === false && !kinds().includes('fullscreen');
+})());
+
+check('реклама не лезет поверх анимаций, экранов и перетаскивания', (() => {
+  const cases = [
+    ['анимация', (st) => { st.isAnimating = true; }],
+    ['конец партии', (st) => { st.isGameOver = true; }],
+    ['экран настроек', (st) => { st.settings = { open: true, t: 1, drag: null }; }],
+    ['экран статистики', (st) => { st.statsScreen = { open: true, t: 1 }; }],
+    ['быстрая панель', (st) => { st.quickPanel = { open: true, t: 1 }; }],
+    ['диалог ролика', (st) => { st.adPrompt = { kind: 'remove', t: 1 }; }],
+    ['перетаскивание', (st) => { st.drag = { stack: null, srcSlot: 0 }; }],
+    ['активный буст', (st) => { st.boost = { kind: 'remove', from: null }; }],
+    ['вкладка свёрнута', (st) => { st.pageActive = false; }]
+  ];
+  const failed = cases.filter(([name, prepare]) => {
+    restart();
+    ripeAd();
+    prepare(GameState);
+    return canShowAdNow(GameState) !== false || checkIdleAd(GameState) !== false;
+  });
+  GameState.pageActive = true;        // restart её не трогает: это про вкладку
+  restart();
+  return failed.length === 0;
+})());
+
+check('смена руки — тоже пауза, в которую просится реклама', (() => {
+  ripeAd();
+  const shown = maybeAdOnNewHand(GameState);
+  return shown === true && kinds().includes('fullscreen');
+})());
+
+check('пока висит предупреждение, ход не проходит и геймплей остановлен', (() => {
+  restart();
+  GameState.adNotice = { since: Date.now() };
+  syncGameplay(GameState);
+  const slot = filledSlot();
+  const center = render.handSlotCenter(slot);
+  fire('pointerdown', center.x, center.y);
+  const noDrag = GameState.drag === null && GameState.hand.slots[slot] !== null;
+  const paused = gameplayActive(GameState) === false;
+  render.drawAll(GameState);          // плашка рисуется без ошибок
+  GameState.adNotice = null;
+  syncGameplay(GameState);
+  return noDrag && paused;
+})());
+
+resetPlatform();
+restart();
+check('без площадки простой ничего не показывает', (() => {
+  GameState.lastActionMs = Date.now() - CONFIG.ads.idleMs - 1;
+  return Platform.adReady() === false && checkIdleAd(GameState) === false &&
+    canShowAdNow(GameState) === false;
+})());
+Platform.gameReady = true;
+Platform.attach(makeYsdk());
+
+// 9. вёрстка диалога: подписи влезают в кнопки на обоих языках
+const adLangBefore = CONFIG.lang;
+['ru', 'en'].forEach(lang => {
+  setLang(lang);
+  const watch = render.adWatchRect();
+  const cancel = render.adCancelRect();
+  const card = render.adPromptRect();
+  check('«' + t('adWatch') + '» влезает в кнопку (' + lang + ')',
+    t('adWatch').length * 13 <= watch.w - 16);
+  check('«' + t('adCancel') + '» влезает в кнопку (' + lang + ')',
+    t('adCancel').length * 12 <= cancel.w - 16);
+  check('заголовок диалога влезает в плашку (' + lang + ')',
+    t('adTitle').length * 16 <= card.w - 24);
+  check('пояснение диалога влезает в плашку (' + lang + ')',
+    t('adBody').length * 9.5 <= card.w - 24,
+    'подпись ~' + Math.round(t('adBody').length * 9.5) + ' px при плашке ' + card.w);
+});
+setLang(adLangBefore);
+const adCard = render.adPromptRect();
+check('плашка диалога не вылезает за канвас',
+  adCard.x >= 0 && adCard.x + adCard.w <= CONFIG.canvas.width &&
+  adCard.y >= 0 && adCard.y + adCard.h <= CONFIG.canvas.height);
+check('кнопки диалога не перекрываются',
+  render.adWatchRect().x + render.adWatchRect().w < render.adCancelRect().x);
 
 resetPlatform();
 restart();

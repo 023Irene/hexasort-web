@@ -498,6 +498,32 @@ const CONFIG = {
   // flush() зовётся ещё и в конце партии, и при уходе со вкладки, а у облака
   // лимит 100 записей за 5 минут.
   platform:  { sdkSrc: '/sdk.js', cloudMinMs: 4000 },
+  // Реклама и оценка (Phase 42, Этап 2 плана публикации). Частоту межстраничной
+  // площадка режет и сама, но свой кулдаун нужен: серия быстрых проигрышей
+  // подряд иначе показывала бы ролик на каждый «Заново», а доки прямо называют
+  // навязчивый показ причиной снижения дохода (п. 4.4).
+  //
+  // Условие ровно одно — время (Phase 42.1, по playtest). Сначала к нему был
+  // добавлен счётчик «через партию», и вместе они давали непредсказуемый момент
+  // показа: с секундомером в руках реклама не приходила, потому что не дозрел
+  // счётчик. Одно понятное правило лучше двух точных.
+  //
+  // freeBoostsPerRun — потолок роликов за партию. Частота rewarded у площадки не
+  // ограничена вовсе, но без потолка бесплатный «Убрать» делал бы партию
+  // бесконечной, а это уже про баланс, а не про рекламу.
+  //
+  // Автопоказ (Phase 42.2) ждёт паузу, а не бьёт по таймеру: доки прямо приводят
+  // setInterval(showFullscreenAdv, ...) как антипример, а п. 4.4 требует показывать
+  // рекламу только в логических паузах. Пауз две — простой игрока и раздача новой
+  // руки; перед роликом висит предупреждение, чтобы тап не пришёлся по рекламе.
+  ads: {
+    interstitialMinMs: 300000,    // не чаще раза в пять минут
+    idleMs: 6000,                 // столько без действий — уже пауза
+    noticeMs: 1500,               // предупреждение перед роликом
+    checkMs: 1000,                // как часто проверяем простой
+    freeBoostsPerRun: 3,          // бесплатных бустов за партию
+    reviewMinGames: 3             // раньше третьей партии оценку не просим
+  },
   // Оформление и геометрия отрисовки
   ui: {
     bg: '#1E2A3A',
@@ -607,6 +633,14 @@ const CONFIG = {
     // Ряд «Возрождение» + «Заново» на оверлее конца. Шире кнопки «Заново»
     // (Phase 41): в половинки от 240 не влезало слово «Возрождение».
     gameOverRow: { w: 360, gap: 12 },
+    // Диалог «ролик за буст» (Phase 42). Плашка по центру канваса: она перекрывает
+    // и панель бустов, откуда пришёл игрок, и оверлей конца — своей высоты ей
+    // хватает, поэтому от переменной высоты канваса зависит только положение.
+    adPrompt: { w: 460, h: 300, radius: 18,
+                buttonW: 200, buttonH: 58, buttonGap: 16,
+                titleY: -96,        // от центра плашки
+                bodyY: -40,
+                boostY: 6 },        // название буста крупно, под пояснением
     buttonRadius: 14
   },
   // Псевдо-3D стопки: слои со смещением вверх, верхняя фишка видна целиком
@@ -673,7 +707,12 @@ const I18N = {
     statsBurns: 'Сгораний всего: ',
     statsBiggest: 'Самый крупный блок: ',
     statsCombo: 'Самая длинная цепочка: ',
-    statsCoins: 'Монет заработано: '
+    statsCoins: 'Монет заработано: ',
+    adTitle: 'Посмотреть рекламу?',
+    adBody: 'После ролика бесплатно применится буст',
+    adWatch: 'Смотреть',
+    adCancel: 'Отмена',
+    adNotice: 'Реклама…'
   },
   en: {
     hint: 'Place a stack next to the same colour',
@@ -708,7 +747,12 @@ const I18N = {
     statsBurns: 'Total burns: ',
     statsBiggest: 'Biggest block: ',
     statsCombo: 'Longest chain: ',
-    statsCoins: 'Coins earned: '
+    statsCoins: 'Coins earned: ',
+    adTitle: 'Watch an ad?',
+    adBody: 'After the video you get one free boost',
+    adWatch: 'Watch',
+    adCancel: 'Cancel',
+    adNotice: 'Ad break…'
   }
 };
 
@@ -1014,6 +1058,8 @@ const Platform = {
   lastCloudMs: 0,
   cloudPending: false,
   lastSent: null,        // последний отправленный снимок: одинаковое не шлём дважды
+  lastAdMs: 0,           // когда показывали межстраничную (Phase 42)
+  reviewAsked: false,    // оценку просят один раз за сессию
 
   hasSdk() {
     return !!Platform.ysdk;
@@ -1204,6 +1250,113 @@ const Platform = {
     } catch (e) {
       return 'failed';
     }
+  },
+
+  // --- Реклама и оценка (Phase 42) ------------------------------------------
+  // Наружу и здесь торчат намерения: «партия кончилась, покажи если положено»,
+  // «игрок хочет буст за ролик», «сейчас удачный момент попросить оценку».
+  // Решение «показывать или нет» принимает Platform, а не вызывающий код: иначе
+  // счётчики и кулдаун расползлись бы по input и main.
+  //
+  // Общее правило всех трёх: без площадки колбэк завершения зовётся немедленно и
+  // синхронно. Иначе двойной клик по файлу давал бы мёртвую кнопку «Заново».
+
+  // Полноэкранная реклама между партиями. Частоту режет и сама площадка (наш
+  // вызов может ничего не показать и прислать onClose(false)) — свой кулдаун
+  // нужен, чтобы не долбить её на каждый быстрый проигрыш.
+  //
+  // Условие одно — время. Первый показ за сессию проходит сразу: lastAdMs = 0,
+  // то есть «с прошлого раза прошла вечность». Это верно по смыслу — партию до
+  // этого «Заново» игрок уже доиграл.
+  showInterstitial(done) {
+    const finish = Platform.once(done);
+    const adv = Platform.advApi();
+    if (!adv || !adv.showFullscreenAdv) { finish(); return 'no-sdk'; }
+    if (Date.now() - Platform.lastAdMs < CONFIG.ads.interstitialMinMs) { finish(); return 'cooldown'; }
+    Platform.lastAdMs = Date.now();
+    try {
+      adv.showFullscreenAdv({ callbacks: {
+        onOpen: () => Platform.adPause(true),
+        onClose: () => { Platform.adPause(false); finish(); },
+        onError: () => { Platform.adPause(false); finish(); }
+      } });
+      return 'shown';
+    } catch (e) {
+      finish();
+      return 'failed';
+    }
+  },
+
+  // Ролик за вознаграждение. Награда приходит в onRewarded и только в нём:
+  // onClose срабатывает и когда игрок закрыл ролик на середине.
+  showRewarded(onReward, done) {
+    const finish = Platform.once(done);
+    const adv = Platform.advApi();
+    if (!adv || !adv.showRewardedVideo) { finish(); return 'no-sdk'; }
+    try {
+      adv.showRewardedVideo({ callbacks: {
+        onOpen: () => Platform.adPause(true),
+        onRewarded: () => { if (onReward) onReward(); },
+        onClose: () => { Platform.adPause(false); finish(); },
+        onError: () => { Platform.adPause(false); finish(); }
+      } });
+      return 'shown';
+    } catch (e) {
+      finish();
+      return 'failed';
+    }
+  },
+
+  // Требование 4.7: на время полноэкранной рекламы звук и геймплей на паузу.
+  // Работу делает setPageActive — та же, что у сворачивания вкладки. Свои вызовы
+  // нужны потому, что game_api_pause присылает площадка, а полагаться на чужое
+  // событие там, где отказ модерации, — плохая ставка; повторный вызов безвреден.
+  adPause(active) {
+    setPageActive(!active);
+    return active;
+  },
+
+  // Запрос оценки (п. 2.13). Спросить можно один раз за сессию, и доки требуют
+  // сперва canReview: без него requestReview вернёт отказ с ошибкой в консоли.
+  askReview() {
+    if (Platform.reviewAsked) return 'asked-before';
+    const api = Platform.ysdk && Platform.ysdk.feedback;
+    if (!api || !api.canReview) return 'no-sdk';
+    Platform.reviewAsked = true;
+    try {
+      api.canReview().then((res) => {
+        if (!res || !res.value || !api.requestReview) return;
+        const promise = api.requestReview();
+        if (promise && promise.then) promise.then(() => {}, () => {});
+      }, () => {});
+      return 'asked';
+    } catch (e) {
+      return 'failed';
+    }
+  },
+
+  advApi() {
+    return Platform.ysdk ? Platform.ysdk.adv : null;
+  },
+
+  // Созрел ли автопоказ (Phase 42.2). Нулевой lastAdMs — это «первая партия»:
+  // пока игрок не нажал «Заново» ни разу, реклама сама не приходит вовсе.
+  adReady() {
+    if (!Platform.advApi()) return false;
+    if (!Platform.lastAdMs) return false;
+    return Date.now() - Platform.lastAdMs >= CONFIG.ads.interstitialMinMs;
+  },
+
+  // Колбэк завершения обязан сработать ровно один раз: onClose и onError могут
+  // прийти оба, а вторая партия подряд с одного нажатия — это потерянная первая.
+  once(fn) {
+    let called = false;
+    return () => {
+      if (called || !fn) return false;
+      called = true;
+      fn();
+      return true;
+    };
   }
 };
 
@@ -2098,11 +2251,33 @@ const generators = {
     for (let i = 0; i < count; i++) {
       const cell = state.cells.get(keys[i]);
       // стартовое поле всегда простое — своя ступень, только одноцветные стопки
-      const stack = generators.makeStack(state.activeColors, 0, undefined,
-        CONFIG.stack.startBoard);
+      const stack = generators.makeStack(state.activeColors, 0,
+        generators.startColorFor(state, cell), CONFIG.stack.startBoard);
       stack.cell = { q: cell.q, r: cell.r };
       cell.stack = stack;
     }
+  },
+
+  // Цвет стартовой стопки: любой, которого нет у соседей (Phase 42.1, по playtest).
+  // Раньше раскладка ставила цвета вслепую, и рядом оказывались две одноцветные
+  // стопки — они стоят и ничего не делают, потому что волну запускает только ход
+  // игрока, а выглядит это как сломанная игра.
+  //
+  // Правило действует только на стартовую раскладку: в ходе партии одноцветные
+  // соседи появляются после сгораний, и это уже правило игры, а не дефект.
+  startColorFor(state, cell) {
+    const taken = new Set();
+    hexMath.neighbors(cell.q, cell.r).forEach(n => {
+      const near = state.cells.get(hexMath.key(n.q, n.r));
+      if (near && near.stack) taken.add(near.stack.tiles[near.stack.tiles.length - 1]);
+    });
+    const free = [];
+    for (let color = 0; color < state.activeColors; color++) {
+      if (!taken.has(color)) free.push(color);
+    }
+    // свободных цветов не осталось — ставим любой: цикл важнее правила
+    if (!free.length) return undefined;
+    return free[generators.randInt(0, free.length - 1)];
   },
 
   // Свободные ячейки поля
@@ -2894,6 +3069,10 @@ const render = {
              lineWidth: 1.8 },
     // «ещё»: три точки — общепринятый знак «остальные настройки»
     more: { fill: 'M12 4.4a2 2 0 1 0 0 4 2 2 0 1 0 0-4zM12 10a2 2 0 1 0 0 4 2 2 0 1 0 0-4zM12 15.6a2 2 0 1 0 0 4 2 2 0 1 0 0-4z' },
+    // Экран с «плей» и объективом сбоку (Phase 42): метка «этот буст можно
+    // взять за ролик». Рисуется вместо цены на кнопке, до которой не хватило монет.
+    video: { fill: 'M7.6 9.4l4.6 2.6-4.6 2.6z',
+             stroke: 'M3 6.6h11.4a1.4 1.4 0 0 1 1.4 1.4v8a1.4 1.4 0 0 1-1.4 1.4H3a1.4 1.4 0 0 1-1.4-1.4V8a1.4 1.4 0 0 1 1.4-1.4zM17 10.6l4-2.6v8l-4-2.6z' },
     // перестановка: две стрелки навстречу — общепринятый знак обмена
     move: { stroke: 'M4 9h14.4M15 5.6L18.4 9 15 12.4M20 15H5.6M9 11.6L5.6 15 9 18.4',
             lineWidth: 2.2 },
@@ -3092,6 +3271,113 @@ const render = {
     ctx.globalAlpha = 1;
   },
 
+  // --- Диалог «ролик за буст» (Phase 42) ------------------------------------
+  // Требование 4.5.1: из текста и кнопки должно быть однозначно понятно, что
+  // сейчас будет реклама и что именно игрок за неё получит. Поэтому на плашке
+  // и вопрос про рекламу, и название буста, который применится бесплатно.
+
+  adPromptRect() {
+    const cfg = CONFIG.ui.adPrompt;
+    return {
+      x: (CONFIG.canvas.width - cfg.w) / 2,
+      y: (CONFIG.canvas.height - cfg.h) / 2,
+      w: cfg.w, h: cfg.h
+    };
+  },
+
+  // Кнопки в ряд внизу плашки: «Смотреть» слева, «Отмена» справа
+  adButtonRect(index) {
+    const cfg = CONFIG.ui.adPrompt;
+    const card = render.adPromptRect();
+    const total = cfg.buttonW * 2 + cfg.buttonGap;
+    const left = card.x + (card.w - total) / 2;
+    return {
+      x: left + index * (cfg.buttonW + cfg.buttonGap),
+      y: card.y + card.h - cfg.buttonH - 24,
+      w: cfg.buttonW, h: cfg.buttonH
+    };
+  },
+  adWatchRect() { return render.adButtonRect(0); },
+  adCancelRect() { return render.adButtonRect(1); },
+
+  drawAdPrompt(state) {
+    const prompt = state.adPrompt;
+    if (!prompt) return;
+    const ctx = render.ctx;
+    const ui = CONFIG.ui;
+    const cfg = ui.adPrompt;
+    const card = render.adPromptRect();
+    const cx = card.x + card.w / 2;
+    const cy = card.y + card.h / 2;
+
+    ctx.globalAlpha = prompt.t === undefined ? 1 : prompt.t;
+    ctx.fillStyle = ui.overlayBg;
+    ctx.fillRect(0, 0, CONFIG.canvas.width, CONFIG.canvas.height);
+    render.paperCard(card.x, card.y, card.w, card.h, cfg.radius, ui.cardFill);
+
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = ui.text;
+    ctx.font = 'bold 30px system-ui, sans-serif';
+    ctx.fillText(t('adTitle'), cx, cy + cfg.titleY);
+    ctx.fillStyle = ui.textDim;
+    ctx.font = '18px system-ui, sans-serif';
+    ctx.fillText(t('adBody'), cx, cy + cfg.bodyY);
+
+    // значок и название буста: игрок должен видеть ровно то, что получит
+    const config = input.boostConfig(prompt.kind);
+    render.boostIcon(prompt.kind, cx, cy + cfg.boostY, 40);
+    ctx.fillStyle = ui.text;
+    ctx.font = 'bold 22px system-ui, sans-serif';
+    ctx.fillText(t(config.label), cx, cy + cfg.boostY + 42);
+
+    const watch = render.adWatchRect();
+    render.withPress(state, 'ad:watch', watch, () => {
+      render.paperCard(watch.x, watch.y, watch.w, watch.h, ui.buttonRadius, ui.buttonFill);
+      ctx.fillStyle = ui.buttonText;
+      ctx.font = 'bold 22px system-ui, sans-serif';
+      ctx.fillText(t('adWatch'), watch.x + watch.w / 2, watch.y + watch.h / 2 + 1);
+    });
+    const cancel = render.adCancelRect();
+    render.withPress(state, 'ad:cancel', cancel, () => {
+      render.roundRectPath(cancel.x, cancel.y, cancel.w, cancel.h, ui.buttonRadius);
+      ctx.lineWidth = 2;
+      ctx.strokeStyle = ui.text;
+      ctx.stroke();
+      ctx.fillStyle = ui.text;
+      ctx.font = '20px system-ui, sans-serif';
+      ctx.fillText(t('adCancel'), cancel.x + cancel.w / 2, cancel.y + cancel.h / 2 + 1);
+    });
+    ctx.globalAlpha = 1;
+  },
+
+  // Предупреждение перед межстраничной (Phase 42.2). Плашка узкая и без кнопок:
+  // отвечать не надо, через noticeMs она сама сменится роликом. Смысл её в том,
+  // чтобы игрок убрал палец — тап по внезапной рекламе доки считают фродом.
+  adNoticeRect() {
+    const cfg = CONFIG.ui.adPrompt;
+    return {
+      x: (CONFIG.canvas.width - cfg.w) / 2,
+      y: (CONFIG.canvas.height - cfg.buttonH * 2) / 2,
+      w: cfg.w, h: cfg.buttonH * 2
+    };
+  },
+
+  drawAdNotice(state) {
+    if (!state.adNotice) return;
+    const ctx = render.ctx;
+    const ui = CONFIG.ui;
+    const card = render.adNoticeRect();
+    ctx.fillStyle = ui.overlayBg;
+    ctx.fillRect(0, 0, CONFIG.canvas.width, CONFIG.canvas.height);
+    render.paperCard(card.x, card.y, card.w, card.h, ui.adPrompt.radius, ui.cardFill);
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = ui.text;
+    ctx.font = 'bold 26px system-ui, sans-serif';
+    ctx.fillText(t('adNotice'), card.x + card.w / 2, card.y + card.h / 2);
+  },
+
   // Бумажный лист: заливка и тень, обводка — только если нужна акцентная рамка.
   // Главный приём стиля «Слои бумаги»: глубину даёт тень, а не контур.
   paperCard(x, y, w, h, r, fill, stroke) {
@@ -3268,12 +3554,23 @@ const render = {
 
       // цена — под кнопкой, а не внутри неё (Phase 33): внутри она отнимала у
       // значка половину плашки. Одно число без монетки — решение пользователя.
+      //
+      // Монет не хватило, но за буст можно посмотреть ролик (Phase 42) — вместо
+      // цены рисуем значок видео: приглушённую кнопку игрок иначе не нажмёт и
+      // про рекламу не узнает.
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
-      ctx.font = Math.round(bar.priceSize) + 'px system-ui, sans-serif';
-      ctx.fillStyle = affordable ? CONFIG.ui.text : CONFIG.ui.textDim;
-      ctx.fillText(String(boost.cost), rect.x + rect.w / 2,
-        rect.y + rect.h + bar.priceGap);
+      const byAd = !affordable && canOfferAd(state, boost.kind);
+      if (byAd) {
+        ctx.globalAlpha = 1;
+        render.drawIcon('video', rect.x + rect.w / 2, rect.y + rect.h + bar.priceGap,
+          bar.priceSize * 1.3, CONFIG.ui.text, CONFIG.ui.text);
+      } else {
+        ctx.font = Math.round(bar.priceSize) + 'px system-ui, sans-serif';
+        ctx.fillStyle = affordable ? CONFIG.ui.text : CONFIG.ui.textDim;
+        ctx.fillText(String(boost.cost), rect.x + rect.w / 2,
+          rect.y + rect.h + bar.priceGap);
+      }
       ctx.globalAlpha = 1;
       if (press !== 1) ctx.restore();
     });
@@ -3749,6 +4046,8 @@ const render = {
     render.drawQuickPanel(state);
     render.drawStats(state);
     render.drawSettings(state);      // настройки лежат поверх всего
+    render.drawAdPrompt(state);      // диалог рекламы — ещё выше: он ждёт ответа
+    render.drawAdNotice(state);      // а предупреждение перед роликом — поверх всего
     render.drawFps();                // dev-замер, включается адресом ?fps=1
   }
 };
@@ -3928,7 +4227,13 @@ const input = {
     }
     if (state.isAnimating || state.isGameOver) { denyFeedback(); return; }
     const config = input.boostConfig(kind);
-    if (state.coins < config.cost) { denyFeedback(); return; }   // не хватило монет
+    // Не хватило монет — предлагаем ролик за бесплатное применение (Phase 42).
+    // Площадки нет или лимит роликов за партию исчерпан — прежний честный отказ.
+    if (state.coins < config.cost && state.freeBoost !== kind) {
+      if (canOfferAd(state, kind)) { openAdPrompt(state, kind); return; }
+      denyFeedback();
+      return;
+    }
     // буст несовместим с перетаскиванием стопки из руки
     if (state.drag) {
       state.hand.slots[state.drag.srcSlot] = state.drag.stack;
@@ -3948,7 +4253,7 @@ const input = {
     const old = state.hand.slots.map(s => (s ? s.tiles.slice() : null));
     generators.dealHand(state);
     state.boost = null;
-    spendCoins(state, config.cost);
+    spendCoins(state, boostCostFor(state, config.kind));
     Audio.boost(config.kind);
     state.isAnimating = true;
     state.handAnim = { old, t: 0 };
@@ -3977,7 +4282,6 @@ const input = {
   applyBoostTo(state, cell) {
     const boost = state.boost;
     if (!input.isBoostTarget(state, cell)) { denyFeedback(); return; }
-    const config = input.boostConfig(boost.kind);
 
     // Доска меняется сразу, а анимация показывает переход — тот же приём, что и
     // у переливов: planWave тоже снимает фишки до полёта, а рендер прячет их.
@@ -3987,7 +4291,7 @@ const input = {
       spawnScatter(state, cell, tiles);
       Audio.boost(boost.kind);
       startFx(state);
-      input.finishBoost(state, config.cost, [cell]);
+      input.finishBoost(state, boost.kind, [cell]);
       return;
     }
     if (!boost.from) {                 // «перестановка»: сначала ячейка-источник
@@ -4010,7 +4314,7 @@ const input = {
       moves.push({ tiles: swapped.tiles, from: cell, to: source });
     }
     Audio.boost(boost.kind);
-    input.finishBoost(state, config.cost, [cell, source], input.boostFlight(moves));
+    input.finishBoost(state, boost.kind, [cell, source], input.boostFlight(moves));
   },
 
   // Описание перелёта стопок для рендера: ячейки-цели прячутся, пока идёт полёт
@@ -4022,10 +4326,12 @@ const input = {
     };
   },
 
-  // Списать монеты, проиграть перелёт и только потом разрешать слияния
-  finishBoost(state, cost, changedCells, flight) {
+  // Списать монеты, проиграть перелёт и только потом разрешать слияния.
+  // Цену считает boostCostFor, а не вызывающий код: применение, оплаченное
+  // роликом (Phase 42), бесплатно, и это правило должно жить в одном месте.
+  finishBoost(state, kind, changedCells, flight) {
     state.boost = null;
-    spendCoins(state, cost);
+    spendCoins(state, boostCostFor(state, kind));
     const resume = () => {
       const starts = changedCells.filter(c => c.stack);
       if (starts.length) {
@@ -4055,6 +4361,24 @@ const input = {
       // первый жест — единственный момент, когда браузер разрешает завести звук.
       // Здесь проходит любое касание канваса, все ранние return идут ниже.
       Audio.unlock();
+      markActivity(state);       // отсчёт простоя для автопоказа (Phase 42.2)
+
+      // Предупреждение перед роликом забирает ввод целиком: тап в этот момент не
+      // должен ни делать ход, ни попасть по уже открывшейся рекламе.
+      if (state.adNotice) return;
+
+      // Диалог «ролик за буст» ждёт ответа и лежит выше всех экранов: игра под
+      // ним стоит, а случайный тап мимо не должен ни закрывать его, ни делать ход.
+      if (state.adPrompt) {
+        if (input.hitRect(render.adWatchRect(), point.x, point.y)) {
+          input.pressButton(state, 'ad:watch');
+          watchAdForBoost(state);
+        } else if (input.hitRect(render.adCancelRect(), point.x, point.y)) {
+          input.pressButton(state, 'ad:cancel');
+          closeAdPrompt(state);
+        }
+        return;
+      }
 
       // экран настроек лежит поверх всего и забирает ввод целиком
       if (state.settings && state.settings.open) {
@@ -4111,7 +4435,10 @@ const input = {
         }
         if (input.hitRect(render.restartHalfRect(), point.x, point.y)) {
           input.pressButton(state, 'restart');
-          restart();
+          // Межстраничная реклама (Phase 42) — только здесь: это единственная
+          // логическая пауза между партиями (п. 4.4). Показывать или пропустить,
+          // решает Platform; без площадки restart() отработает синхронно.
+          Platform.showInterstitial(restart);
         }
         return;
       }
@@ -4245,6 +4572,9 @@ const input = {
 
     // Отпускание: положить стопку либо довернуть поле до ближайшей грани
     canvas.addEventListener('pointerup', (event) => {
+      // конец жеста — тоже действие: долгое перетаскивание не должно считаться
+      // простоем, иначе реклама выскочит сразу после того, как палец отпустили
+      markActivity(state);
       // в хранилище ходим один раз на жест, а не на каждое движение пальца
       if (state.settings && state.settings.drag !== null) {
         state.settings.drag = null;
@@ -4369,6 +4699,11 @@ const GameState = {
   statsScreen: null,   // экран статистики: {open, values, t}
   settings: null,      // экран настроек: {open, t, drag} — drag это индекс ползунка
   quickPanel: null,    // быстрая панель у шестерёнки: {open, t} (Phase 41)
+  adPrompt: null,      // диалог «ролик за буст»: {kind, t} (Phase 42)
+  adNotice: null,      // предупреждение перед межстраничной (Phase 42.2)
+  lastActionMs: 0,     // когда игрок в последний раз что-то делал
+  freeBoost: null,     // буст, оплаченный роликом: применится бесплатно один раз
+  adBoostsUsed: 0,     // сколько роликов за буст показано за эту партию
   hoverKey: null,      // ключ подсвеченной свободной ячейки под стопкой
   pageActive: true,    // вкладка на виду и площадка не показывает рекламу (Phase 40)
   radius: CONFIG.board.radiusSteps[0].radius,   // текущий радиус поля
@@ -4442,7 +4777,8 @@ function fxAlive(state) {
     (state.statsScreen && state.statsScreen.open && state.statsScreen.t < 1) ||
     (state.settings && state.settings.open && state.settings.t < 1) ||
     (!!state.quickPanel && (state.quickPanel.open ? state.quickPanel.t < 1
-      : state.quickPanel.t > 0));
+      : state.quickPanel.t > 0)) ||
+    (!!state.adPrompt && state.adPrompt.t < 1);
 }
 
 // Экспоненциальный догон с защёлкиванием: без него значение приближается вечно
@@ -4511,6 +4847,8 @@ function stepFx(state, dt) {
     quick.t = quick.open ? Math.min(1, quick.t + step) : Math.max(0, quick.t - step);
     if (!quick.open && quick.t === 0) state.quickPanel = null;
   }
+  const prompt = state.adPrompt;
+  if (prompt && prompt.t < 1) prompt.t = Math.min(1, prompt.t + dt / a.overlayFadeMs);
 }
 
 function startFx(state) {
@@ -4778,7 +5116,14 @@ function finishWave(state) {
   } else if (state.handAnim) {
     animate(state, CONFIG.animation.handSwapMs,
       (t) => { state.handAnim.t = t; },
-      () => { state.handAnim = null; state.isAnimating = false; requestRender(); });
+      () => {
+        state.handAnim = null;
+        state.isAnimating = false;
+        requestRender();
+        // рука сменилась целиком — это пауза, в неё и просится реклама (Phase 42.2).
+        // Строго после снятия isAnimating: раньше canShowAdNow отсёк бы показ
+        maybeAdOnNewHand(state);
+      });
   } else {
     state.isAnimating = false;
     requestRender();
@@ -5097,10 +5442,15 @@ function checkGameOver(state) {
   if (state.hand.slots.every(s => s === null)) return;
   state.isGameOver = true;
   state.overlayT = 0;                     // оверлей проявляется, а не выпрыгивает
-  saveRunStats(state);                    // итог партии в статистику (Phase 20)
+  const stats = saveRunStats(state);      // итог партии в статистику (Phase 20)
   Storage.flush();                        // конец партии — момент записать наверняка
   // признак рекорда считается так же, как в оверлее: updateBest уже отработал
-  Audio.over(state.score >= state.best && state.score > 0);
+  const isRecord = state.score >= state.best && state.score > 0;
+  // Оценку просим в лучший момент партии, а не в первый попавшийся (п. 2.13):
+  // сразу после личного рекорда и не раньше, чем игрок разобрался в игре.
+  // Дальше решает площадка — своего окна у нас нет.
+  if (isRecord && stats.games >= CONFIG.ads.reviewMinGames) Platform.askReview();
+  Audio.over(isRecord);
   Haptics.vibrate(CONFIG.haptics.over);
   syncGameplay(state);                    // геймплей кончился — площадке сообщаем
   startFx(state);
@@ -5156,6 +5506,134 @@ function openStats(state) {
   syncGameplay(state);
   startFx(state);             // экран проявляется, а не выпрыгивает
   requestRender();
+}
+
+// --- Ролик за буст (Phase 42) ----------------------------------------------
+// Награда за рекламу по требованию 4.5.2 — дополнительный бонус, который не
+// влияет на возможность продолжить игру. Поэтому ролик даёт бесплатное
+// применение буста, а не монеты: монеты тратятся ещё и на «Возрождение», и
+// цепочка «посмотрел ролик — продолжил проигранную партию» была бы нарушением.
+
+// Предлагать ли ролик вместо отказа. Без площадки предложения нет вовсе:
+// диалог, за которым ничего не стоит, хуже честного «не хватило монет».
+function canOfferAd(state, kind) {
+  if (!Platform.hasSdk()) return false;
+  if (state.isGameOver || state.isAnimating || state.adPrompt) return false;
+  if (state.adBoostsUsed >= CONFIG.ads.freeBoostsPerRun) return false;
+  return !!input.boostConfig(kind);
+}
+
+function openAdPrompt(state, kind) {
+  state.adPrompt = { kind, t: 0 };
+  state.boost = null;         // выбор ячейки подождёт ответа на вопрос
+  syncGameplay(state);        // ролик — это пауза геймплея (пп. 1.19.3, 4.7)
+  startFx(state);             // плашка проявляется, а не выпрыгивает
+  requestRender();
+  return kind;
+}
+
+function closeAdPrompt(state) {
+  state.adPrompt = null;
+  syncGameplay(state);
+  requestRender();
+  return true;
+}
+
+// «Смотреть»: плашка уходит сразу, дальше всё решают колбэки площадки. Буст
+// выдаётся только по onRewarded — onClose приходит и тогда, когда игрок закрыл
+// ролик на середине.
+function watchAdForBoost(state) {
+  const prompt = state.adPrompt;
+  if (!prompt) return false;
+  const kind = prompt.kind;
+  closeAdPrompt(state);
+  Platform.showRewarded(
+    () => grantFreeBoost(state, kind),
+    () => requestRender());
+  return true;
+}
+
+// Награда пришла: следующее применение этого буста бесплатно, и он сразу
+// становится активным — лишний тап после рекламы игрок бы не понял.
+function grantFreeBoost(state, kind) {
+  state.adBoostsUsed++;
+  state.freeBoost = kind;
+  Audio.ring();               // награда пришла: тот же голос, что у нового кольца
+  input.toggleBoost(state, kind);
+  requestRender();
+  return kind;
+}
+
+// --- Автопоказ рекламы в паузе (Phase 42.2) --------------------------------
+// Пользователь хотел ролик «раз в пять минут сам». Таймер посреди хода делать
+// нельзя: доки приводят setInterval(showFullscreenAdv, …) как антипример, а
+// п. 4.4 требует логических пауз — случайный тап по всплывшей рекламе считается
+// фродом и режет доход. Поэтому созревший показ ждёт паузу: игрок ничего не
+// делает idleMs или только что получил новую руку.
+
+function markActivity(state) {
+  state.lastActionMs = Date.now();
+  return state.lastActionMs;
+}
+
+// Можно ли показать ролик прямо сейчас. Список длинный намеренно: реклама поверх
+// диалога, перетаскиваемой стопки или анимации — это ровно то, что запрещает п. 4.4.
+function canShowAdNow(state) {
+  if (!Platform.hasSdk() || !Platform.adReady()) return false;
+  if (state.pageActive === false) return false;
+  if (state.isGameOver || state.isAnimating) return false;
+  if (state.adNotice || state.adPrompt || state.boost || state.drag) return false;
+  if (state.settings && state.settings.open) return false;
+  if (state.statsScreen && state.statsScreen.open) return false;
+  if (state.quickPanel && state.quickPanel.open) return false;
+  return true;
+}
+
+// Предупреждение перед роликом. Анимации у плашки нет намеренно: juice длиннее
+// 1000 мс уходит в бесконечную рекурсию RAF (в тестах часы прыгают на секунду за
+// кадр), а ждать надо полторы. Плашка просто висит и забирает ввод.
+function showAdNotice(state) {
+  if (!canShowAdNow(state)) return false;
+  state.adNotice = { since: Date.now() };
+  syncGameplay(state);        // для площадки геймплей уже кончился (пп. 1.19.3, 4.7)
+  requestRender();
+  setTimeout(() => runNoticedAd(state), CONFIG.ads.noticeMs);
+  return true;
+}
+
+function runNoticedAd(state) {
+  if (!state.adNotice) return false;
+  Platform.showInterstitial(() => {
+    state.adNotice = null;
+    markActivity(state);      // отсчёт простоя начинается заново
+    syncGameplay(state);
+    requestRender();
+  });
+  return true;
+}
+
+// Повод первый: игрок ничего не делает. Зовётся из setInterval — именно из него,
+// а не из самоперезаводящегося setTimeout: тот в тестах немедленный и зациклил бы
+// сборку (та же ловушка, что у планировщика музыки).
+function checkIdleAd(state) {
+  if (Date.now() - state.lastActionMs < CONFIG.ads.idleMs) return false;
+  return showAdNotice(state);
+}
+
+// Повод второй: рука опустела и раздана новая. Зовётся из finishWave после того,
+// как анимация падения руки закончилась и снят isAnimating.
+function maybeAdOnNewHand(state) {
+  return showAdNotice(state);
+}
+
+// Цена применения. Единственная точка, где решается, платный ход или нет:
+// списаний два (обычные бусты и «Пересдача»), и правило должно быть одно.
+function boostCostFor(state, kind) {
+  const config = input.boostConfig(kind);
+  if (!config) return 0;
+  if (state.freeBoost !== kind) return config.cost;
+  state.freeBoost = null;     // оплаченное роликом применение тратится один раз
+  return 0;
 }
 
 // --- Экран настроек (Phase 19) ---------------------------------------------
@@ -5280,6 +5758,11 @@ function restart() {
   GameState.statsScreen = null;
   GameState.settings = null;      // громкости при этом остаются: они не про партию
   GameState.quickPanel = null;
+  GameState.adPrompt = null;
+  GameState.adNotice = null;
+  GameState.lastActionMs = Date.now();
+  GameState.freeBoost = null;
+  GameState.adBoostsUsed = 0;     // лимит роликов — на партию, как у возрождения
   GameState.hoverKey = null;
   resetCamera(GameState);
   input.spin = null;
@@ -5366,6 +5849,7 @@ function setPageActive(active) {
 // это замечание модерации.
 function gameplayActive(state) {
   return state.pageActive !== false && !state.isGameOver &&
+    !state.adPrompt && !state.adNotice &&
     !(state.settings && state.settings.open) &&
     !(state.statsScreen && state.statsScreen.open);
 }
@@ -5407,6 +5891,10 @@ function init() {
     document.addEventListener('visibilitychange',
       () => setPageActive(!document.hidden));
   }
+  // Простой игрока — повод показать созревшую рекламу (Phase 42.2). Кадры игра
+  // рисует по событию, RAF в затишье стоит, поэтому нужен свой таймер; без
+  // площадки он каждый раз упирается в canShowAdNow и ничего не делает.
+  setInterval(() => checkIdleAd(GameState), CONFIG.ads.checkMs);
   exposeQaHooks();
   // Площадка подключается последней и параллельно: ресурсов у игры нет, ждать
   // сеть ей незачем — она уже готова, о чём и сообщает markGameReady (Phase 40).
