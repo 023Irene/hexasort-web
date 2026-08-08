@@ -74,7 +74,7 @@
 
 ```
 index.html            вся игра
-tests/core.test.js    тесты ядра (780 проверок)
+tests/core.test.js    тесты ядра (835 проверок)
 ```
 
 **Тесты:** `node tests/core.test.js` — код выхода 0 означает, что всё зелёное.

@@ -1,9 +1,20 @@
 ﻿<!DOCTYPE html>
 <html lang="ru">
 <head>
+<!-- Вся игра лежит в этом файле: разметка, стили и код. Так задумано (ADR-0001) —
+     ни сборки, ни зависимостей, ни внешних запросов: файл открывается двойным
+     кликом и работает офлайн. -->
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Papercomb</title>
+<meta name="description" content="Бумажная гекса-головоломка: ставьте цветные стопки, собирайте одиннадцать фишек одного цвета и запускайте цепные сгорания. Играть бесплатно.">
+<!-- тот же цвет бумаги, что и в CSS ниже: им браузер красит свою обвязку вокруг страницы -->
+<meta name="theme-color" content="#EFE6D5">
+<!-- Значок вкладки нарисован прямо здесь, в data:-URI: отдельного .ico или .svg
+     в поставке быть не может — файл в игре ровно один. %23 это экранированная
+     решётка, без неё браузер обрежет адрес по якорю. Адрес в xmlns никуда не
+     ходит: это имя пространства имён SVG, а не ссылка на ресурс. -->
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23EFE6D5'/%3E%3Cpath d='M16 5 26 10.5v11L16 27 6 21.5v-11z' fill='%23D1495B'/%3E%3C/svg%3E">
 <style>
   /* Канвас по центру окна. Пропорции больше не заданы в CSS: логическую высоту
      ставит layoutUi() по форме окна (Phase 24), иначе на телефоне 9:19.5 игра
@@ -46,7 +57,11 @@
 </style>
 </head>
 <body>
+<!-- Ширина канваса всегда 720 — от неё считается вся горизонтальная разметка.
+     Высота здесь стартовая: настоящую подберёт layoutUi() под форму окна. -->
 <canvas id="game" width="720" height="900"></canvas>
+<!-- Скрипт стоит в конце body, а не в head: к моменту запуска канвас уже в DOM,
+     и его не приходится ждать отдельным событием. -->
 <script>
 'use strict';
 
@@ -509,15 +524,9 @@ const CONFIG = {
   // aroundCount: 1 — это одна строка над своей и одна под, всего одиннадцать
   // строк вместе с топом. Больше на экран не встаёт: снизу кнопка «Назад», и
   // список обязан кончиться выше неё.
-  //
-  // demoRows — ВРЕМЕННЫЙ выключатель (Phase 43.1): без площадки таблица
-  // заполняется выдуманными строками, чтобы посмотреть вёрстку списка до того,
-  // как лидерборд заведут в Консоли. ПЕРЕД ПУБЛИКАЦИЕЙ ОБЯЗАН БЫТЬ false —
-  // иначе демо-версия на GitHub Pages врёт игроку про несуществующий рейтинг.
   leaderboard: { topCount: 8, aroundCount: 1, cacheMs: 20000,
                  submitMinMs: 1500,    // setScore: лимит 1 запрос в секунду
-                 nameWidth: 300,       // столько места у имени, дальше многоточие
-                 demoRows: false },
+                 nameWidth: 300 },     // столько места у имени, дальше многоточие
   // Лига (Phase 37, вернулась в Phase 43). На площадке плашка показывает место в
   // таблице, без неё — дивизион по личному рекорду: вёрстка не должна зависеть
   // от того, есть ли лидерборд.
@@ -1484,10 +1493,6 @@ const Platform = {
   fetchTop(done) {
     const api = Platform.lbApi();
     if (!api || !api.getEntries) {
-      if (Platform.demoActive()) {
-        if (done) done(Platform.demoTop());
-        return 'demo';
-      }
       if (done) done(null);
       return 'no-sdk';
     }
@@ -1512,30 +1517,6 @@ const Platform = {
       if (done) done(null);
       return 'failed';
     }
-  },
-
-  // Идёт ли сейчас демо-показ таблицы. Флаг сам по себе ничего не значит: на
-  // площадке таблица настоящая, и подменять её выдумкой нельзя ни при каких
-  // обстоятельствах.
-  demoActive() {
-    return !Platform.lbApi() && !!CONFIG.leaderboard.demoRows;
-  },
-
-  // ВРЕМЕННО (Phase 43.1): выдуманная таблица, чтобы посмотреть вёрстку списка
-  // до того, как лидерборд заведут в Консоли. Форма ответа ровно та же, что у
-  // readEntries, — иначе демо показывало бы не то, что будет на площадке.
-  // Снимается вместе с CONFIG.leaderboard.demoRows.
-  demoTop() {
-    const names = ['Хвоя', 'Мотылёк', 'Тихоня', 'Гербарий', 'Сойка',
-                   'Бумажный лис', 'Компас', 'Северянка'];
-    const entries = names.map((name, i) => ({
-      rank: i + 1, score: 4820 - i * 310, name, me: false
-    }));
-    const myRank = 41;
-    entries.push({ rank: myRank - 1, score: 1310, name: 'Пилигрим', me: false });
-    entries.push({ rank: myRank, score: 1270, name: 'Вы', me: true });
-    entries.push({ rank: myRank + 1, score: 1240, name: 'Ветка', me: false });
-    return { userRank: myRank, entries };
   },
 
   // Ответ площадки разбирается здесь, а не в рендере: наружу должны уходить
@@ -6002,10 +5983,8 @@ function leagueLabel(state) {
 // Экран открывается сразу, а таблица приезжает в него потом: ждать сеть игра не
 // должна нигде, это то же правило, что и у облака сохранений (Phase 40).
 function openRank(state) {
-  // Демо считается «вошедшим»: приглашению войти отведено то же место, что и
-  // строкам, и вместе они наложились бы друг на друга
   state.rankScreen = { open: true, t: 0, status: 'loading', entries: [],
-                       authorized: Platform.isAuthorized() || Platform.demoActive() };
+                       authorized: Platform.isAuthorized() };
   syncGameplay(state);
   startFx(state);
   requestRender();
@@ -6018,7 +5997,7 @@ function receiveRank(state, data) {
   if (!screen) return false;
   screen.status = data ? 'ready' : 'unavailable';
   screen.entries = (data && data.entries) || [];
-  screen.authorized = Platform.isAuthorized() || Platform.demoActive();
+  screen.authorized = Platform.isAuthorized();
   if (data && data.userRank) state.rank = data.userRank;
   requestRender();
   return true;

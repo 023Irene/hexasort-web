@@ -2648,8 +2648,12 @@ delete windowStub.render_game_to_text;
 delete windowStub.__SET_SEED__;
 
 // 5. поставка: игра остаётся одним файлом без внешних зависимостей
+// <link> разрешён только с data:-URI: значок вкладки нарисован прямо в разметке
+// и никуда не ходит. Запрещён внешний адрес, а не сам тег.
 check('в index.html нет внешних подключений (script src / link / import)',
-  !/<script[^>]+src=/i.test(html) && !/<link[^>]+href=/i.test(html) &&
+  !/<script[^>]+src=/i.test(html) &&
+  (html.match(/<link[^>]+href=["'][^"']*["']/gi) || [])
+    .every((tag) => /href=["']data:/i.test(tag)) &&
   !/\bimport\s+.*from\b/.test(js) && !/\brequire\(/.test(js));
 check('канвас один', (html.match(/<canvas/g) || []).length === 1);
 check('все секции спеки §14 на месте',
@@ -4007,8 +4011,12 @@ check('вызовы SDK не разбрелись по коду',
   !outsidePlatform.includes('features.') && !outsidePlatform.includes('getPlayer'));
 check('внешний адрес в игре ровно один — SDK площадки',
   (stripComments(js).match(/['"][^'"]*\.js['"]/g) || []).length === 1);
+// <link> с data:-URI не нарушает автономности: значок вкладки нарисован прямо в
+// разметке и никуда не ходит. Запрещён именно внешний адрес, а не тег как таковой.
 check('разметка по-прежнему без внешних подключений',
-  !/<script[^>]+src=/i.test(html) && !/<link[^>]+href=/i.test(html));
+  !/<script[^>]+src=/i.test(html) &&
+  (html.match(/<link[^>]+href=["'][^"']*["']/gi) || [])
+    .every((tag) => /href=["']data:/i.test(tag)));
 
 console.log('\n--- Phase 42: реклама и оценка ---');
 
@@ -4310,10 +4318,6 @@ restart();
 console.log('\n--- Phase 43: лидерборд и лига ---');
 
 // 1. без площадки: экран открывается и честно говорит, что таблицы нет.
-// Демо-строки (Phase 43.1) на время этого блока выключены — иначе таблица
-// приезжает выдуманная. Флаг временный и снимается перед публикацией.
-const demoBefore = CONFIG.leaderboard.demoRows;
-CONFIG.leaderboard.demoRows = false;
 resetPlatform();
 restart();
 check('без площадки рекорд никуда не уходит', Platform.submitScore(1000) === 'no-sdk');
@@ -4329,29 +4333,10 @@ const rankBack = render.restartButtonRect();
 fire('pointerdown', rankBack.x + rankBack.w / 2, rankBack.y + rankBack.h / 2);
 check('«Назад» закрывает экран лидерборда', GameState.rankScreen.open === false);
 
-// 1а. демо-таблица (Phase 43.1): без площадки экран показывает выдуманные
-// строки и ведёт себя как «вошедший» — приглашение войти не должно лечь поверх
-CONFIG.leaderboard.demoRows = true;
-openRank(GameState);
-check('демо-таблица приезжает вместо «недоступно»',
-  GameState.rankScreen.status === 'ready' &&
-  GameState.rankScreen.entries.length > CONFIG.leaderboard.topCount);
-check('в демо есть своя строка и разрыв нумерации', (() => {
-  const rows = GameState.rankScreen.entries;
-  const mine = rows.filter(e => e.me);
-  return mine.length === 1 && mine[0].rank > CONFIG.leaderboard.topCount + 1;
-})());
-check('демо считается вошедшим', GameState.rankScreen.authorized === true);
-check('в демо место попадает на плашку', GameState.rank === 41);
-render.drawAll(GameState);            // отрисовка демо-таблицы не должна падать
-GameState.rankScreen.open = false;
-CONFIG.leaderboard.demoRows = demoBefore;
-check('на площадке демо не подменяет таблицу', (() => {
-  Platform.attach(makeYsdk());
-  const demo = Platform.demoActive();
-  Platform.ysdk = null;
-  return demo === false;
-})());
+// 1а. выдуманных строк в игре не осталось: демо-таблица (Phase 43.1) снята
+// перед подачей, и подменить настоящий рейтинг больше нечем
+check('демо-таблицы в коде нет',
+  !js.includes('demoTop') && !js.includes('demoActive') && !js.includes('demoRows'));
 
 // 2. плашка лиги без площадки показывает дивизион, с местом — место
 GameState.rank = 0;
