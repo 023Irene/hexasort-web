@@ -497,7 +497,41 @@ const CONFIG = {
   // и игра остаётся автономной. cloudMinMs — свой предохранитель поверх flushMs:
   // flush() зовётся ещё и в конце партии, и при уходе со вкладки, а у облака
   // лимит 100 записей за 5 минут.
-  platform:  { sdkSrc: '/sdk.js', cloudMinMs: 4000 },
+  // leaderboardName — «Техническое название» из Консоли разработчика. Имя
+  // осталось от прежнего названия игры и менять его нельзя: игрок его не видит,
+  // а повторно использовать имя удалённого лидерборда площадка не даёт.
+  platform:  { sdkSrc: '/sdk.js', cloudMinMs: 4000,
+               leaderboardName: 'hexasort_score' },
+  // Лидерборд (Phase 43). Числа взяты под лимиты площадки: getEntries — 20
+  // запросов за 5 минут, а экран открывается с оверлея конца, куда игрок
+  // возвращается часто, поэтому ответ кэшируется. Потолки самой площадки:
+  // quantityTop ≤ 20, quantityAround ≤ 10.
+  // aroundCount: 1 — это одна строка над своей и одна под, всего одиннадцать
+  // строк вместе с топом. Больше на экран не встаёт: снизу кнопка «Назад», и
+  // список обязан кончиться выше неё.
+  //
+  // demoRows — ВРЕМЕННЫЙ выключатель (Phase 43.1): без площадки таблица
+  // заполняется выдуманными строками, чтобы посмотреть вёрстку списка до того,
+  // как лидерборд заведут в Консоли. ПЕРЕД ПУБЛИКАЦИЕЙ ОБЯЗАН БЫТЬ false —
+  // иначе демо-версия на GitHub Pages врёт игроку про несуществующий рейтинг.
+  leaderboard: { topCount: 8, aroundCount: 1, cacheMs: 20000,
+                 submitMinMs: 1500,    // setScore: лимит 1 запрос в секунду
+                 nameWidth: 300,       // столько места у имени, дальше многоточие
+                 demoRows: false },
+  // Лига (Phase 37, вернулась в Phase 43). На площадке плашка показывает место в
+  // таблице, без неё — дивизион по личному рекорду: вёрстка не должна зависеть
+  // от того, есть ли лидерборд.
+  //
+  // Ступеней пять (Phase 43.1). Алмаз на 8000 — редкая вершина: медиана бота
+  // 1270, максимум около 3100, так что выше платины забираются единицы. Цвет
+  // ступени красит кубок на плашке; обводку даёт render.shade, второй цвет не нужен.
+  league:    { tiers: [
+                 { fromBest: 0,    key: 'leagueBronze',   color: '#A9714B' },
+                 { fromBest: 1000, key: 'leagueSilver',   color: '#AEB6BD' },
+                 { fromBest: 2500, key: 'leagueGold',     color: '#E0B040' },
+                 { fromBest: 5000, key: 'leaguePlatinum', color: '#8FA8B8' },
+                 { fromBest: 8000, key: 'leagueDiamond',  color: '#6FD0E0' }
+               ] },
   // Реклама и оценка (Phase 42, Этап 2 плана публикации). Частоту межстраничной
   // площадка режет и сама, но свой кулдаун нужен: серия быстрых проигрышей
   // подряд иначе показывала бы ролик на каждый «Заново», а доки прямо называют
@@ -552,18 +586,32 @@ const CONFIG = {
     // и у нижнего ряда срезало обводку с тенью («невидимая стена» на playtest)
     boardArea: { top: 90, bottom: 610, sideMargin: 20, bottomPad: 12 },
     scoreY: 62,
-    // Верх экрана (Phase 41, по playtest): слева монеты, по центру счёт без
-    // значка, справа рекорд. Плашка лиги убрана — она занимала правый угол и
-    // вернётся вместе с лидербордом площадки. Шестерёнка внизу, в ряду бустов.
+    // Верх экрана (Phase 43.1, по playtest): слева столбиком рекорд и под ним
+    // монеты, по центру счёт без значка, справа плашка лиги. Шестерёнка внизу,
+    // в ряду бустов.
+    //
+    // Значка у строки рекорда нет намеренно: кубок теперь стоит на плашке лиги,
+    // и второй такой же слева читался бы повтором — тот же ход, каким Phase 41
+    // убрала звезду у счёта.
     bestY: 40,
-    bestRight: 700,          // правый край строки рекорда
+    bestX: 22,               // левый край строки рекорда
     bestCharWidth: 11,       // запасная ширина знака: measureText есть не везде
     trophySize: 20,
     trophyGap: 8,
-    coinsY: 40,              // кошелёк на одной строке с рекордом, слева
+    coinsY: 72,              // кошелёк строкой ниже рекорда
     coinsX: 22,
     coinColor: '#F1C40F',
     coinRadius: 9,
+    // плашка лиги: кубок и подпись, правый верхний угол (Phase 43.1)
+    league: { w: 156, h: 38, top: 18, margin: 18, radius: 10,
+              iconSize: 22, iconGap: 8 },
+    // Экран лидерборда (Phase 43). Строки считаются от rowsY вниз; своя строка
+    // рисуется плашкой, чужие — просто текстом. Шаг мелкий не от красоты:
+    // одиннадцать строк обязаны кончиться выше кнопки «Назад».
+    rank: { titleY: 150, rowsY: 205, rowStep: 34, rowH: 30,
+            rankX: 130, nameX: 176, scoreRight: 590,
+            gapAfterTop: 18,      // просвет между топом и окрестностью игрока
+            signInY: 508, avatarR: 12 },
     hintY: 655,
     handY: 780,              // центр ряда слотов руки
     handSlotSpacing: 175,    // расстояние между центрами слотов
@@ -670,8 +718,8 @@ const CONFIG = {
 // словарях обязан совпадать, это закрыто тестом. Наружу торчит только t(key):
 // рендер не знает, какой язык включён, — тот же приём, что и с темой.
 //
-// Язык определяется по браузеру и держится до конца сессии: игрок может выбрать
-// его руками в настройках, но хранилища у игры нет (ADR-0010).
+// Язык определяется по браузеру, дальше игрок может выбрать его руками; выбор
+// живёт в настройках хранилища и уважается площадкой (Phase 40).
 // ============================================================================
 const I18N = {
   ru: {
@@ -712,7 +760,21 @@ const I18N = {
     adBody: 'После ролика бесплатно применится буст',
     adWatch: 'Смотреть',
     adCancel: 'Отмена',
-    adNotice: 'Реклама…'
+    adNotice: 'Реклама…',
+    leaderboard: 'Рейтинг',
+    lbLoading: 'Загружаем таблицу…',
+    lbUnavailable: 'Таблица работает на Яндекс Играх',
+    lbEmpty: 'В таблице пока пусто',
+    lbHidden: 'Игрок скрыт',
+    lbSignInWhy: 'Войди с Яндекс ID, чтобы попасть в таблицу',
+    signIn: 'Войти',
+    yourPlace: 'Твоё место: ',
+    leagueRank: 'Место ',
+    leagueBronze: 'Бронза',
+    leagueSilver: 'Серебро',
+    leagueGold: 'Золото',
+    leaguePlatinum: 'Платина',
+    leagueDiamond: 'Алмаз'
   },
   en: {
     hint: 'Place a stack next to the same colour',
@@ -752,7 +814,21 @@ const I18N = {
     adBody: 'After the video you get one free boost',
     adWatch: 'Watch',
     adCancel: 'Cancel',
-    adNotice: 'Ad break…'
+    adNotice: 'Ad break…',
+    leaderboard: 'Leaderboard',
+    lbLoading: 'Loading the table…',
+    lbUnavailable: 'The table works on Yandex Games',
+    lbEmpty: 'The table is still empty',
+    lbHidden: 'Hidden player',
+    lbSignInWhy: 'Sign in with Yandex ID to join the table',
+    signIn: 'Sign in',
+    yourPlace: 'Your place: ',
+    leagueRank: 'Place ',
+    leagueBronze: 'Bronze',
+    leagueSilver: 'Silver',
+    leagueGold: 'Gold',
+    leaguePlatinum: 'Platinum',
+    leagueDiamond: 'Diamond'
   }
 };
 
@@ -1060,6 +1136,8 @@ const Platform = {
   lastSent: null,        // последний отправленный снимок: одинаковое не шлём дважды
   lastAdMs: 0,           // когда показывали межстраничную (Phase 42)
   reviewAsked: false,    // оценку просят один раз за сессию
+  lastScoreMs: 0,        // setScore: лимит площадки 1 запрос в секунду (Phase 43)
+  rankCache: null,       // последний ответ таблицы: {ms, data}
 
   hasSdk() {
     return !!Platform.ysdk;
@@ -1345,6 +1423,157 @@ const Platform = {
     if (!Platform.advApi()) return false;
     if (!Platform.lastAdMs) return false;
     return Date.now() - Platform.lastAdMs >= CONFIG.ads.interstitialMinMs;
+  },
+
+  // --- Лидерборд (Phase 43) --------------------------------------------------
+  // Наружу и здесь торчат намерения: «запиши мой рекорд», «дай таблицу», «игрок
+  // нажал Войти». Актуальный вход — ysdk.leaderboards; getLeaderboards() доки
+  // объявили устаревшим.
+  //
+  // Права у методов разные, и это определяет весь экран: getEntries работает и
+  // анониму, а setScore с getPlayerEntry требуют авторизации. Поэтому таблицу
+  // видят все, а своя строка появляется только после входа.
+
+  lbApi() {
+    return Platform.ysdk ? Platform.ysdk.leaderboards : null;
+  },
+
+  // Авторизован ли игрок. Синхронно: ответ нужен посреди кадра, а промис кадр
+  // не ждёт. getMode() из старых доков объявлен устаревшим — берём isAuthorized.
+  isAuthorized() {
+    try {
+      return !!(Platform.player && Platform.player.isAuthorized &&
+                Platform.player.isAuthorized());
+    } catch (e) {
+      return false;
+    }
+  },
+
+  // Рекорд в таблицу. Зовётся только на личном рекорде: таблица хранит лучший
+  // результат, а лимит площадки — один запрос в секунду.
+  submitScore(score) {
+    const api = Platform.lbApi();
+    if (!api || !api.setScore) return 'no-sdk';
+    if (!Platform.isAuthorized()) return 'no-auth';
+    if (Date.now() - Platform.lastScoreMs < CONFIG.leaderboard.submitMinMs) return 'too-soon';
+    Platform.lastScoreMs = Date.now();
+    try {
+      Platform.ifAvailable('leaderboards.setScore', () => {
+        const promise = api.setScore(CONFIG.platform.leaderboardName, score);
+        if (promise && promise.then) promise.then(() => {}, () => {});
+      });
+      return 'sent';
+    } catch (e) {
+      return 'failed';
+    }
+  },
+
+  // Доки требуют спрашивать доступность метода перед вызовом: на части устройств
+  // лидерборда нет, и прямой вызов уходит в ошибку. Если спросить не у кого,
+  // просто зовём — хуже уже не будет.
+  ifAvailable(name, fn) {
+    const ysdk = Platform.ysdk;
+    if (!ysdk || !ysdk.isAvailableMethod) { fn(); return 'assumed'; }
+    ysdk.isAvailableMethod(name).then((ok) => { if (ok) fn(); }, () => {});
+    return 'asked';
+  },
+
+  // Таблица. Колбэк получает {entries, userRank} или null, если не сложилось.
+  // Кэш обязателен: лимит getEntries — 20 запросов за 5 минут, а экран
+  // открывается с оверлея конца, куда игрок возвращается после каждой партии.
+  fetchTop(done) {
+    const api = Platform.lbApi();
+    if (!api || !api.getEntries) {
+      if (Platform.demoActive()) {
+        if (done) done(Platform.demoTop());
+        return 'demo';
+      }
+      if (done) done(null);
+      return 'no-sdk';
+    }
+    const cache = Platform.rankCache;
+    if (cache && Date.now() - cache.ms < CONFIG.leaderboard.cacheMs) {
+      if (done) done(cache.data);
+      return 'cached';
+    }
+    const cfg = CONFIG.leaderboard;
+    try {
+      api.getEntries(CONFIG.platform.leaderboardName, {
+        quantityTop: cfg.topCount,
+        includeUser: Platform.isAuthorized(),
+        quantityAround: cfg.aroundCount
+      }).then((res) => {
+        const data = Platform.readEntries(res);
+        Platform.rankCache = { ms: Date.now(), data };
+        if (done) done(data);
+      }, () => { if (done) done(null); });
+      return 'asked';
+    } catch (e) {
+      if (done) done(null);
+      return 'failed';
+    }
+  },
+
+  // Идёт ли сейчас демо-показ таблицы. Флаг сам по себе ничего не значит: на
+  // площадке таблица настоящая, и подменять её выдумкой нельзя ни при каких
+  // обстоятельствах.
+  demoActive() {
+    return !Platform.lbApi() && !!CONFIG.leaderboard.demoRows;
+  },
+
+  // ВРЕМЕННО (Phase 43.1): выдуманная таблица, чтобы посмотреть вёрстку списка
+  // до того, как лидерборд заведут в Консоли. Форма ответа ровно та же, что у
+  // readEntries, — иначе демо показывало бы не то, что будет на площадке.
+  // Снимается вместе с CONFIG.leaderboard.demoRows.
+  demoTop() {
+    const names = ['Хвоя', 'Мотылёк', 'Тихоня', 'Гербарий', 'Сойка',
+                   'Бумажный лис', 'Компас', 'Северянка'];
+    const entries = names.map((name, i) => ({
+      rank: i + 1, score: 4820 - i * 310, name, me: false
+    }));
+    const myRank = 41;
+    entries.push({ rank: myRank - 1, score: 1310, name: 'Пилигрим', me: false });
+    entries.push({ rank: myRank, score: 1270, name: 'Вы', me: true });
+    entries.push({ rank: myRank + 1, score: 1240, name: 'Ветка', me: false });
+    return { userRank: myRank, entries };
+  },
+
+  // Ответ площадки разбирается здесь, а не в рендере: наружу должны уходить
+  // простые строки и числа, иначе объект SDK разъехался бы по всему коду.
+  // Имя пустое у игрока, который скрыл профиль, — так и предупреждают доки.
+  readEntries(res) {
+    const list = (res && res.entries) || [];
+    return {
+      userRank: (res && res.userRank) || 0,
+      entries: list.map(e => ({
+        rank: e.rank,
+        score: e.score,
+        name: (e.player && e.player.publicName) || '',
+        me: !!(res && res.userRank && e.rank === res.userRank)
+      }))
+    };
+  },
+
+  // Окно входа. Требование 1.2.1: открывается только по осознанному нажатию
+  // кнопки «Войти», и нигде больше. После успеха доки требуют заново получить
+  // Player — прежний объект остаётся анонимным.
+  openAuth(done) {
+    const finish = Platform.once(() => { if (done) done(Platform.isAuthorized()); });
+    const auth = Platform.ysdk && Platform.ysdk.auth;
+    if (!auth || !auth.openAuthDialog) { finish(); return 'no-sdk'; }
+    try {
+      auth.openAuthDialog().then(() => {
+        Platform.rankCache = null;        // после входа таблица другая: своя строка
+        Platform.ysdk.getPlayer().then((player) => {
+          if (player) Platform.player = player;
+          finish();
+        }, finish);
+      }, finish);
+      return 'asked';
+    } catch (e) {
+      finish();
+      return 'failed';
+    }
   },
 
   // Колбэк завершения обязан сработать ровно один раз: onClose и onError могут
@@ -2929,19 +3158,18 @@ const render = {
     ctx.textAlign = 'center';
     ctx.fillText(scoreText, CONFIG.canvas.width / 2, ui.scoreY);
 
-    // Рекорд переехал в правый верхний угол (Phase 41), монеты остались слева и
-    // поднялись на его строку: плашка лиги, занимавшая правый угол, убрана.
-    ctx.textAlign = 'right';
+    // Рекорд переехал влево, к монетам (Phase 43.1, по playtest): они родственны
+    // — оба про накопленное, — а правый угол вернулся плашке лиги.
+    ctx.textAlign = 'left';
     // рекорд, побитый в этой партии, держится акцентным цветом до её конца
     // (Phase 20): вспышка гаснет за секунду, а факт остаётся
     ctx.fillStyle = state.recordBeaten ? ui.text : ui.textDim;
     ctx.font = '20px system-ui, sans-serif';
     const bestText = t(state.recordBeaten ? 'newRecord' : 'record') + state.best;
-    const bestLeft = ui.bestRight - render.textWidth(bestText, ui.bestCharWidth);
-    render.trophyIcon(bestLeft - ui.trophyGap - ui.trophySize / 2, ui.bestY, ui.trophySize);
-    ctx.fillText(bestText, ui.bestRight, ui.bestY);
+    ctx.fillText(bestText, ui.bestX, ui.bestY);
 
     render.drawCoins(state);
+    render.drawLeagueBadge(state);
 
     // активный буст объясняет, что выбирать; иначе стартовая подсказка
     const boostHintKey = state.boost ? input.boostConfig(state.boost.kind).hint : null;
@@ -3193,9 +3421,10 @@ const render = {
              w: left.w, h: left.h };
   },
 
-  // Нижний ряд оверлея конца делят «Возрождение» и «Заново» (Phase 37), а
-  // «Статистика» стоит над ними во всю ширину: четвёртой строки оверлей не
-  // выдерживает — она наезжает на строку кошелька.
+  // Нижний ряд оверлея конца делят «Возрождение» и «Заново» (Phase 37), а над
+  // ними — «Рейтинг» и «Статистика» (Phase 43): четвёртой строки оверлей не
+  // выдерживает, она наезжает на строку кошелька, поэтому вход в лидерборд встал
+  // половинкой рядом со статистикой, а не отдельной кнопкой.
   //
   // Ряд шире кнопки «Заново» (Phase 41, по playtest): половинки от 240 давали
   // 115 px, и слово «Возрождение» вылезало за края плашки. Ширину задаёт
@@ -3211,9 +3440,191 @@ const render = {
     return { x: left.x + left.w + CONFIG.ui.gameOverRow.gap, y: left.y,
              w: left.w, h: left.h };
   },
-  statsButtonRect() {
+  // Верхний ряд оверлея: «Рейтинг» слева, «Статистика» справа. Ширина и зазор —
+  // те же, что у ряда «Возрождение»/«Заново», иначе кнопки не встали бы в столбик.
+  rankButtonRect() {
+    const row = CONFIG.ui.gameOverRow;
     const btn = render.restartButtonRect();
-    return { x: btn.x, y: btn.y - btn.h - 2, w: btn.w, h: btn.h - 12 };
+    const half = (row.w - row.gap) / 2;
+    return { x: (CONFIG.canvas.width - row.w) / 2, y: btn.y - btn.h - 2,
+             w: half, h: btn.h - 12 };
+  },
+  statsButtonRect() {
+    const left = render.rankButtonRect();
+    return { x: left.x + left.w + CONFIG.ui.gameOverRow.gap, y: left.y,
+             w: left.w, h: left.h };
+  },
+
+  // --- Экран лидерборда (Phase 43) -------------------------------------------
+  // Устроен как экран статистики: заливка цветом темы, заголовок, кнопка «Назад»
+  // по той же геометрии. Аватары не грузим (ADR-0001 запрещает внешние картинки,
+  // да и глянцевое фото поверх бумаги смотрится чужеродно) — вместо них кружок с
+  // первой буквой имени, нарисованный кодом.
+  signInButtonRect() {
+    const btn = render.restartButtonRect();
+    return { x: btn.x, y: CONFIG.ui.rank.signInY, w: btn.w, h: btn.h - 8 };
+  },
+
+  // Строки идут сверху вниз; между топом и окрестностью игрока просвет, в
+  // котором рисуется многоточие — иначе «8-е место, 41-е место» читается как
+  // ошибка. gap считается по первой строке, чей номер оторвался от предыдущего.
+  rankRowY(rows, i) {
+    const cfg = CONFIG.ui.rank;
+    let y = cfg.rowsY;
+    for (let n = 0; n < i; n++) {
+      y += cfg.rowStep;
+      if (rows[n + 1] && rows[n + 1].gapBefore) y += cfg.gapAfterTop;
+    }
+    return y;
+  },
+
+  // Разрыв в нумерации — это граница между топом и окрестностью игрока
+  rankRows(screen) {
+    const rows = (screen.entries || []).map(e => ({ ...e }));
+    rows.forEach((row, i) => {
+      row.gapBefore = i > 0 && row.rank > rows[i - 1].rank + 1;
+    });
+    return rows;
+  },
+
+  drawRank(state) {
+    const screen = state.rankScreen;
+    if (!screen || !screen.open) return;
+    const ctx = render.ctx;
+    const ui = CONFIG.ui;
+    const cfg = ui.rank;
+    const W = CONFIG.canvas.width;
+
+    ctx.globalAlpha = screen.t === undefined ? 1 : screen.t;
+    ctx.fillStyle = ui.overlayBg;
+    ctx.fillRect(0, 0, W, CONFIG.canvas.height);
+
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = ui.overlayText;
+    ctx.font = 'bold 34px system-ui, sans-serif';
+    ctx.fillText(t('leaderboard'), W / 2, cfg.titleY);
+
+    const rows = render.rankRows(screen);
+    if (screen.status !== 'ready' || rows.length === 0) {
+      const keys = { loading: 'lbLoading', unavailable: 'lbUnavailable' };
+      ctx.fillStyle = ui.textDim;
+      ctx.font = '20px system-ui, sans-serif';
+      ctx.fillText(t(keys[screen.status] || 'lbEmpty'), W / 2, cfg.rowsY + cfg.rowStep);
+    } else {
+      rows.forEach((row, i) => {
+        const y = render.rankRowY(rows, i);
+        if (row.gapBefore) {
+          ctx.textAlign = 'center';
+          ctx.fillStyle = ui.textDim;
+          ctx.font = '20px system-ui, sans-serif';
+          ctx.fillText('•••', W / 2, y - cfg.gapAfterTop / 2 - cfg.rowStep / 2);
+        }
+        // своя строка — плашкой: в списке из одиннадцати строк её иначе не найти
+        if (row.me) {
+          render.paperCard(cfg.rankX - 40, y - cfg.rowH / 2,
+            cfg.scoreRight - cfg.rankX + 80, cfg.rowH, ui.buttonRadius, ui.cardFill);
+        }
+        ctx.fillStyle = row.me ? ui.text : ui.textDim;
+        ctx.textAlign = 'right';
+        ctx.font = 'bold 20px system-ui, sans-serif';
+        ctx.fillText(String(row.rank), cfg.rankX, y);
+        render.rankAvatar(row, cfg.nameX - cfg.avatarR - 10, y);
+        ctx.textAlign = 'left';
+        ctx.font = '20px system-ui, sans-serif';
+        ctx.fillText(render.clipText(row.name || t('lbHidden'),
+          CONFIG.leaderboard.nameWidth), cfg.nameX, y);
+        ctx.textAlign = 'right';
+        ctx.font = 'bold 20px system-ui, sans-serif';
+        ctx.fillText(String(row.score), cfg.scoreRight, y);
+      });
+    }
+
+    // Приглашение войти — только текстом и кнопкой, и только для гостя.
+    // Само окно входа откроется по нажатию, не раньше (требование 1.2.1).
+    if (screen.status === 'ready' && !screen.authorized) {
+      ctx.textAlign = 'center';
+      ctx.fillStyle = ui.textDim;
+      ctx.font = '19px system-ui, sans-serif';
+      ctx.fillText(t('lbSignInWhy'), W / 2, cfg.signInY - 34);
+      const btn = render.signInButtonRect();
+      render.withPress(state, 'signIn', btn, () => {
+        render.paperCard(btn.x, btn.y, btn.w, btn.h, ui.buttonRadius, ui.buttonFill);
+        ctx.fillStyle = ui.buttonText;
+        ctx.textAlign = 'center';
+        ctx.font = 'bold 22px system-ui, sans-serif';
+        ctx.fillText(t('signIn'), btn.x + btn.w / 2, btn.y + btn.h / 2 + 1);
+      });
+    }
+
+    const back = render.restartButtonRect();
+    render.paperCard(back.x, back.y, back.w, back.h, ui.buttonRadius, ui.buttonFill);
+    ctx.textAlign = 'center';
+    ctx.fillStyle = ui.buttonText;
+    ctx.font = 'bold 24px system-ui, sans-serif';
+    ctx.fillText(t('back'), back.x + back.w / 2, back.y + back.h / 2 + 1);
+    ctx.globalAlpha = 1;
+  },
+
+  // Кружок с первой буквой имени вместо аватара
+  rankAvatar(row, x, y) {
+    const ctx = render.ctx;
+    const ui = CONFIG.ui;
+    const r = ui.rank.avatarR;
+    ctx.beginPath();
+    ctx.arc(x, y, r, 0, Math.PI * 2);
+    ctx.fillStyle = row.me ? ui.buttonFill : ui.cardFill;
+    ctx.fill();
+    ctx.fillStyle = ui.text;
+    ctx.textAlign = 'center';
+    ctx.font = 'bold 16px system-ui, sans-serif';
+    ctx.fillText((row.name || '?').slice(0, 1).toUpperCase(), x, y + 1);
+  },
+
+  // Длинное имя обрезается с многоточием: имена игроков площадки бывают любыми,
+  // а колонка одна на всех
+  clipText(text, maxWidth) {
+    let out = String(text);
+    if (render.textWidth(out, 11) <= maxWidth) return out;
+    while (out.length > 1 && render.textWidth(out + '…', 11) > maxWidth) {
+      out = out.slice(0, -1);
+    }
+    return out + '…';
+  },
+
+  // Плашка лиги (Phase 37, вернулась в Phase 43). На площадке показывает место в
+  // таблице, без неё — дивизион по личному рекорду: игрок должен видеть одно и
+  // то же место интерфейса везде, а не пустоту там, где лидерборда нет.
+  leagueBadgeRect() {
+    const c = CONFIG.ui.league;
+    return { x: CONFIG.canvas.width - c.w - c.margin, y: c.top, w: c.w, h: c.h };
+  },
+
+  // Кубок красится цветом ступени (Phase 43.1): слово «Бронза» само по себе
+  // ничего не обещает, а лестница кубков видна с одного взгляда. Значок и
+  // подпись центрируются как одна группа — иначе на длинном слове плашка
+  // выглядит перекошенной.
+  drawLeagueBadge(state) {
+    const ctx = render.ctx;
+    const ui = CONFIG.ui;
+    const cfg = ui.league;
+    const b = render.leagueBadgeRect();
+    const label = leagueLabel(state);
+    const color = leagueTier(state.best).color;
+    render.withPress(state, 'league', b, () => {
+      render.paperCard(b.x, b.y, b.w, b.h, cfg.radius, ui.cardFill);
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'middle';
+      ctx.font = 'bold 17px system-ui, sans-serif';
+      const cy = b.y + b.h / 2;
+      const textW = render.textWidth(label, 10);
+      const groupW = cfg.iconSize + cfg.iconGap + textW;
+      const left = b.x + (b.w - groupW) / 2;
+      render.drawIcon('trophy', left + cfg.iconSize / 2, cy, cfg.iconSize,
+        color, render.shade(color, -0.3));
+      ctx.fillStyle = ui.text;
+      ctx.fillText(label, left + cfg.iconSize + cfg.iconGap, cy + 1);
+    });
   },
 
   // Экран статистики поверх оверлея конца партии
@@ -3454,6 +3865,7 @@ const render = {
       ctx.font = '18px system-ui, sans-serif';
       ctx.fillText(label, rect.x + rect.w / 2, rect.y + rect.h / 2 + 1);
     });
+    outlineButton(render.rankButtonRect(), t('leaderboard'));
     outlineButton(render.statsButtonRect(), t('stats'));
 
     // «Возрождение»: цена растёт с каждым разом за партию, поэтому она написана
@@ -4045,6 +4457,7 @@ const render = {
     // быстрая панель лежит выше оверлея конца — оттуда тоже глушат музыку
     render.drawQuickPanel(state);
     render.drawStats(state);
+    render.drawRank(state);
     render.drawSettings(state);      // настройки лежат поверх всего
     render.drawAdPrompt(state);      // диалог рекламы — ещё выше: он ждёт ответа
     render.drawAdNotice(state);      // а предупреждение перед роликом — поверх всего
@@ -4395,6 +4808,23 @@ const input = {
         }
         return;
       }
+      // Экран лидерборда — так же: «Назад» и «Войти», больше ничего. Окно входа
+      // открывается только этой кнопкой (требование 1.2.1): открывать его при
+      // входе на экран нельзя, доки приводят это прямым антипримером.
+      if (state.rankScreen && state.rankScreen.open) {
+        if (input.hitRect(render.restartButtonRect(), point.x, point.y)) {
+          state.rankScreen.open = false;
+          syncGameplay(state);
+          requestRender();
+          return;
+        }
+        if (state.rankScreen.status === 'ready' && !state.rankScreen.authorized &&
+            input.hitRect(render.signInButtonRect(), point.x, point.y)) {
+          input.pressButton(state, 'signIn');
+          signIn(state);
+        }
+        return;
+      }
       // Быстрая панель лежит поверх всего, кроме экранов: пока она открыта,
       // её кнопки важнее и оверлея конца, и поля.
       if (state.quickPanel && state.quickPanel.open) {
@@ -4422,7 +4852,18 @@ const input = {
         toggleQuickPanel(state);
         return;
       }
+      // плашка лиги открывает таблицу — и в партии, и на оверлее конца
+      if (input.hitRect(render.leagueBadgeRect(), point.x, point.y)) {
+        input.pressButton(state, 'league');
+        openRank(state);
+        return;
+      }
       if (state.isGameOver) {
+        if (input.hitRect(render.rankButtonRect(), point.x, point.y)) {
+          input.pressButton(state, t('leaderboard'));
+          openRank(state);
+          return;
+        }
         if (input.hitRect(render.statsButtonRect(), point.x, point.y)) {
           input.pressButton(state, t('stats'));
           openStats(state);
@@ -4697,6 +5138,8 @@ const GameState = {
   drag: null,          // текущее перетаскивание: {stack, srcSlot, pointerId, x, y}
   boost: null,         // активный буст: {kind, from}
   statsScreen: null,   // экран статистики: {open, values, t}
+  rankScreen: null,    // экран лидерборда: {open, t, status, entries, authorized}
+  rank: 0,             // место в таблице площадки: 0 — неизвестно
   settings: null,      // экран настроек: {open, t, drag} — drag это индекс ползунка
   quickPanel: null,    // быстрая панель у шестерёнки: {open, t} (Phase 41)
   adPrompt: null,      // диалог «ролик за буст»: {kind, t} (Phase 42)
@@ -4775,6 +5218,7 @@ function fxAlive(state) {
     state.scoreShown !== state.score || state.coinsShown !== state.coins ||
     state.overlayT < 1 ||
     (state.statsScreen && state.statsScreen.open && state.statsScreen.t < 1) ||
+    (state.rankScreen && state.rankScreen.open && state.rankScreen.t < 1) ||
     (state.settings && state.settings.open && state.settings.t < 1) ||
     (!!state.quickPanel && (state.quickPanel.open ? state.quickPanel.t < 1
       : state.quickPanel.t > 0)) ||
@@ -4834,6 +5278,10 @@ function stepFx(state, dt) {
   const screen = state.statsScreen;
   if (screen && screen.open && screen.t < 1) {
     screen.t = Math.min(1, screen.t + dt / a.overlayFadeMs);
+  }
+  const rank = state.rankScreen;
+  if (rank && rank.open && rank.t < 1) {
+    rank.t = Math.min(1, rank.t + dt / a.overlayFadeMs);
   }
   const settings = state.settings;
   if (settings && settings.open && settings.t < 1) {
@@ -5195,6 +5643,9 @@ function captureUiBase() {
     settingsTitleY: ui.settings.titleY,
     settingsRowY: ui.settings.rowY.slice(),
     statsCountersY: ui.stats.countersY,
+    rankTitleY: ui.rank.titleY,
+    rankRowsY: ui.rank.rowsY,
+    rankSignInY: ui.rank.signInY,
     // размеры низа: на высоком экране они растут вместе с высотой, поэтому
     // базовые значения нужно помнить — иначе второй resize умножит их снова
     handHexSize: ui.handHexSize,
@@ -5257,6 +5708,12 @@ function layoutUi(height) {
   // канваса. Без этого сдвига на высоком экране между ними открывается пустая
   // полоса, а рекорд отрывается от заголовка (требования 1.10.1 и 1.10.3).
   ui.stats.countersY = uiBase.statsCountersY + (height - L.baseHeight) / 2;
+  // Экран лидерборда едет тем же полушагом, что и статистика: список считается
+  // сверху, а «Назад» — от центра канваса, и без сдвига они разъезжаются.
+  const rankShift = (height - L.baseHeight) / 2;
+  ui.rank.titleY = uiBase.rankTitleY + rankShift;
+  ui.rank.rowsY = uiBase.rankRowsY + rankShift;
+  ui.rank.signInY = uiBase.rankSignInY + rankShift;
 }
 
 // Подогнать канвас под окно. Возвращает true, если что-то изменилось.
@@ -5450,6 +5907,9 @@ function checkGameOver(state) {
   // сразу после личного рекорда и не раньше, чем игрок разобрался в игре.
   // Дальше решает площадка — своего окна у нас нет.
   if (isRecord && stats.games >= CONFIG.ads.reviewMinGames) Platform.askReview();
+  // Рекорд — в таблицу (Phase 43). Только рекорд: таблица хранит лучший
+  // результат, а у setScore лимит в один запрос в секунду.
+  if (isRecord) Platform.submitScore(state.best);
   Audio.over(isRecord);
   Haptics.vibrate(CONFIG.haptics.over);
   syncGameplay(state);                    // геймплей кончился — площадке сообщаем
@@ -5489,13 +5949,26 @@ function revive(state) {
   state.isGameOver = false;
   state.overlayT = 1;
   state.statsScreen = null;
+  state.rankScreen = null;
   generators.dealHand(state);             // рука могла остаться неполной
-  state.handAnim = { old: [null, null, null], t: 0 };
   Audio.deal();
   updateMusicTension(state);
   syncGameplay(state);        // партия продолжается — геймплей снова идёт
   startFx(state);
   requestRender();
+  // Падение руки в слоты — тем же приёмом, что у «Пересдачи» и у новой раздачи в
+  // finishWave, и обязательно с animate: handAnim без своего цикла остаётся с
+  // t = 0, а при живом handAnim рука рисуется его прозрачностью — то есть не
+  // рисуется вовсе. Цикл juice эту анимацию не ведёт, он про осколки.
+  state.isAnimating = true;
+  state.handAnim = { old: [null, null, null], t: 0 };
+  animate(state, CONFIG.animation.handSwapMs,
+    (t) => { state.handAnim.t = t; },
+    () => {
+      state.handAnim = null;
+      state.isAnimating = false;
+      requestRender();
+    });
   return true;
 }
 
@@ -5506,6 +5979,63 @@ function openStats(state) {
   syncGameplay(state);
   startFx(state);             // экран проявляется, а не выпрыгивает
   requestRender();
+}
+
+// --- Лидерборд и лига (Phase 43) --------------------------------------------
+// Дивизион по личному рекорду: он считается офлайн и работает везде, поэтому
+// плашке всегда есть что показать, даже когда таблицы нет.
+function leagueTier(best) {
+  const tiers = CONFIG.league.tiers;
+  let tier = tiers[0];
+  tiers.forEach(step => { if (best >= step.fromBest) tier = step; });
+  return tier;
+}
+
+// Что написано на плашке: место в таблице, если площадка его дала, иначе
+// дивизион. Место кэшируется в state.rank — плашка рисуется каждый кадр, а
+// спрашивать площадку каждый кадр нельзя.
+function leagueLabel(state) {
+  if (state.rank) return t('leagueRank') + state.rank;
+  return t(leagueTier(state.best).key);
+}
+
+// Экран открывается сразу, а таблица приезжает в него потом: ждать сеть игра не
+// должна нигде, это то же правило, что и у облака сохранений (Phase 40).
+function openRank(state) {
+  // Демо считается «вошедшим»: приглашению войти отведено то же место, что и
+  // строкам, и вместе они наложились бы друг на друга
+  state.rankScreen = { open: true, t: 0, status: 'loading', entries: [],
+                       authorized: Platform.isAuthorized() || Platform.demoActive() };
+  syncGameplay(state);
+  startFx(state);
+  requestRender();
+  Platform.fetchTop((data) => receiveRank(state, data));
+  return state.rankScreen;
+}
+
+function receiveRank(state, data) {
+  const screen = state.rankScreen;
+  if (!screen) return false;
+  screen.status = data ? 'ready' : 'unavailable';
+  screen.entries = (data && data.entries) || [];
+  screen.authorized = Platform.isAuthorized() || Platform.demoActive();
+  if (data && data.userRank) state.rank = data.userRank;
+  requestRender();
+  return true;
+}
+
+// Вход по кнопке «Войти» — единственное место, где открывается окно авторизации.
+// После входа таблицу перезапрашиваем: в ней появилась своя строка.
+function signIn(state) {
+  Platform.openAuth((ok) => {
+    if (state.rankScreen) {
+      state.rankScreen.authorized = ok;
+      state.rankScreen.status = 'loading';
+    }
+    if (ok) Platform.fetchTop((data) => receiveRank(state, data));
+    else requestRender();
+  });
+  return true;
 }
 
 // --- Ролик за буст (Phase 42) ----------------------------------------------
@@ -5585,6 +6115,7 @@ function canShowAdNow(state) {
   if (state.adNotice || state.adPrompt || state.boost || state.drag) return false;
   if (state.settings && state.settings.open) return false;
   if (state.statsScreen && state.statsScreen.open) return false;
+  if (state.rankScreen && state.rankScreen.open) return false;
   if (state.quickPanel && state.quickPanel.open) return false;
   return true;
 }
@@ -5756,6 +6287,8 @@ function restart() {
   GameState.drag = null;
   GameState.boost = null;
   GameState.statsScreen = null;
+  GameState.rankScreen = null;    // место в таблице (GameState.rank) переживает
+                                  // партию: оно про игрока, а не про эту доску
   GameState.settings = null;      // громкости при этом остаются: они не про партию
   GameState.quickPanel = null;
   GameState.adPrompt = null;
@@ -5822,10 +6355,21 @@ function applyFpsFromUrl() {
   setInterval(requestRender, 16);
 }
 
+// QA-хуки живут за адресом `?debug=1` (Phase 43). Раньше они висели на window
+// всегда, и это было безобидно, пока счёт никуда не уходил: с лидербордом
+// __GAME_STATE__.score и __SET_SEED__ становятся способом накрутить таблицу из
+// консоли браузера. `?seed=` и `?fps=1` остались открытыми — ими ничего не
+// накрутишь.
+function qaHooksAllowed() {
+  return /[?&]debug=1/.test(location.search);
+}
+
 function exposeQaHooks() {
+  if (!qaHooksAllowed()) return false;
   window.__GAME_STATE__ = GameState;
   window.render_game_to_text = renderGameToText;
   window.__SET_SEED__ = (value) => { generators.rng.seed(value); restart(); };
+  return true;
 }
 
 // Вкладка ушла из виду или вернулась. На эту же функцию с Phase 40 повешены
@@ -5851,7 +6395,8 @@ function gameplayActive(state) {
   return state.pageActive !== false && !state.isGameOver &&
     !state.adPrompt && !state.adNotice &&
     !(state.settings && state.settings.open) &&
-    !(state.statsScreen && state.statsScreen.open);
+    !(state.statsScreen && state.statsScreen.open) &&
+    !(state.rankScreen && state.rankScreen.open);
 }
 
 function syncGameplay(state) {
